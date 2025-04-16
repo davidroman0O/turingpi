@@ -257,7 +257,24 @@ func main() {
 *   The function returned by `cluster.Run` also returns an error, indicating the final success or failure for that specific node's execution.
 *   Internal errors (mounting, flashing, SSH, state file access) are wrapped and propagated up.
 
-## 12. Next Steps (Implementation Order)
+## 10. Cross-Platform Compatibility
+
+*   **OS Detection**: The library must detect the host operating system to determine the appropriate execution strategy.
+*   **Linux Execution**: On Linux hosts, tools like `kpartx` and other system utilities can be executed directly.
+*   **Non-Linux Execution (macOS, Windows)**:
+    * For image preparation and manipulation that requires Linux-specific tools (e.g., `kpartx`), the library must:
+        * Automatically spawn a Docker container with the necessary tools
+        * Mount appropriate volumes between host and container:
+            * Source image directory
+            * Temporary processing directory
+            * Output/cache directory
+        * Execute the Linux-specific operations inside the container
+        * Clean up the container when finished
+    * For operations that can run on any platform (file operations, SSH connections), execute them directly on the host.
+*   **Configuration**: Allow users to customize Docker image, container options, and volume mappings if needed.
+*   **Fallback**: Provide clear error messages with installation instructions if Docker is not available on non-Linux systems.
+
+## 11. Next Steps (Implementation Order)
 
 1.  Define core structs (`TPIConfig`, `NodeID`, `NodeConfig`, `BoardType`, `Context`, `Node`).
 2.  Implement `NewTuringPi` configuration loading and default handling.
@@ -270,7 +287,7 @@ func main() {
 9.  Add input hashing to state management for improved idempotency.
 10. Develop tests and examples. 
 
-## 11. Extensibility
+## 12. Extensibility
 
 *   Add support for other OS types (e.g., Debian, Arch) by creating corresponding builders (`NewDebianImage`, `NewDebianOSInstaller`, `NewDebianPostInstaller`) and OS-specific runtime helpers (`DebianRuntime`).
 *   The core execution logic (`TuringPiExecutor.Run`) and state management should remain largely OS-agnostic.
