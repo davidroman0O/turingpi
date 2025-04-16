@@ -18,7 +18,7 @@ Key goals include:
 *   **Executor (`TuringPiExecutor`)**: The main object created from `TPIConfig`, holding the configuration and internal clients (BMC, state manager). Created via `NewTuringPi`.
 *   **Per-Node Workflow (`Run` method)**: The `TuringPiExecutor.Run` method accepts a function defining the workflow template for a *single* node. This function receives context (`tpi.Context`) and the specific node's details (`tpi.Node`). It returns a function that, when called with a `NodeID`, executes the workflow for that specific node.
 *   **Fluent Phase Builders**: Specialized builders (e.g., `NewUbuntuImage`, `NewUbuntuOSInstaller`) guide the developer in defining the steps for each phase *within* the workflow function.
-*   **Immediate Phase Execution**: Each phase builder culminates in a `.Run(ctx)` method which executes that phase's logic immediately before the workflow definition proceeds. Results are passed between phases.
+*   **Immediate Phase **Execution****: Each phase builder culminates in a `.Run(ctx)` method which executes that phase's logic immediately before the workflow definition proceeds. Results are passed between phases.
 *   **State Management**: A local state file tracks the completion status, inputs, and outputs of each phase per node, enabling idempotency and resumption.
 *   **Context (`tpi.Context`, `tpi.Node`)**: Passed through the workflow, providing cancellation, access to shared resources (logging, credentials), and node-specific details.
 
