@@ -21,6 +21,56 @@ type InteractionStep struct {
 	LogMsg string // Message to log before sending
 }
 
+// ExecuteCommand runs a non-interactive command on the target node via SSH.
+func ExecuteCommand(ip, user, password, command string) (stdout string, stderr string, err error) {
+	config := &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(password),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second, // Connection timeout
+	}
+
+	addr := fmt.Sprintf("%s:22", ip)
+	log.Printf("[NODE SSH EXEC] Connecting to %s as %s...", addr, user)
+	client, err := ssh.Dial("tcp", addr, config)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to dial %s: %w", addr, err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	session.Stdout = &stdoutBuf
+	session.Stderr = &stderrBuf
+
+	log.Printf("[NODE SSH EXEC] Running: %s", command)
+	err = session.Run(command) // Use Run for non-interactive commands
+
+	stdoutStr := stdoutBuf.String()
+	stderrStr := stderrBuf.String()
+
+	if stdoutStr != "" {
+		log.Printf("[NODE SSH STDOUT]:\n%s", stdoutStr)
+	}
+	if stderrStr != "" {
+		log.Printf("[NODE SSH STDERR]:\n%s", stderrStr)
+	}
+
+	if err != nil {
+		return stdoutStr, stderrStr, fmt.Errorf("command '%s' failed: %w. Stderr: %s", command, err, stderrStr)
+	}
+
+	log.Printf("[NODE SSH EXEC] Command '%s' completed successfully.", command)
+	return stdoutStr, stderrStr, nil
+}
+
 // ExpectAndSend performs a sequence of expect/send interactions over an SSH session.
 // It handles setting up the PTY and shell.
 // It returns the full captured stdout/stderr output and an error if any step failed.
