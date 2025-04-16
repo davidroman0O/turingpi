@@ -32,7 +32,7 @@ func Execute(configFile string, execCtx Context) error {
 	// --- Step Execution Loop ---
 	for i, step := range config.Steps {
 		stepIndex := i + 1
-		log.Printf("--- Starting Step %d: %s (%s) ---", stepIndex, step.Name, step.Type)
+		log.Printf("--- Starting Step %d: %s (%s @ %s) ---", stepIndex, step.Name, step.Type, step.Location)
 
 		// Parse timeout if specified
 		if step.Timeout != "" {
@@ -52,11 +52,10 @@ func Execute(configFile string, execCtx Context) error {
 			stepErr = executeCommandStep(step, execCtx)
 		case TypeExpect:
 			stepErr = executeExpectStep(step, execCtx)
+		case TypeCopy:
+			stepErr = executeCopyStep(step, execCtx)
 		case TypeScript:
 			// TODO: Implement script execution (local/remote)
-			stepErr = fmt.Errorf("step type '%s' not yet implemented", step.Type)
-		case TypeCopy:
-			// TODO: Implement file copy (local/remote, remote/local)
 			stepErr = fmt.Errorf("step type '%s' not yet implemented", step.Type)
 		case TypeWait:
 			// TODO: Implement wait logic
@@ -102,18 +101,34 @@ func executeCommandStep(step Step, execCtx Context) error {
 		// Use os/exec to run locally
 		// TODO: Consider using context with timeout for os/exec
 		cmd := exec.Command("bash", "-c", executableCommand) // Wrap in bash -c for pipelines etc.
-		cmd.Stdout = os.Stdout                               // Stream output
-		cmd.Stderr = os.Stderr
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
 		err = cmd.Run()
+		log.Printf("Local Command Stdout: %s", stdout.String())
+		log.Printf("Local Command Stderr: %s", stderr.String())
 		if err != nil {
 			return fmt.Errorf("local command failed: %w", err)
 		}
 		log.Println("Local command finished successfully.")
 	case LocationRemote:
-		log.Printf("Running remote command: %s", executableCommand)
-		// TODO: Implement remote command execution via direct SSH to node
-		// Need pkg/node.ExecuteCommand or similar (needs SSH config)
-		return fmt.Errorf("remote command execution not yet implemented")
+		log.Printf("Running remote command on %s: %s", execCtx.NodeIP, executableCommand)
+		if execCtx.NodeIP == "" || execCtx.User == "" || execCtx.InitialPassword == "" {
+			return fmt.Errorf("missing node IP, user, or password in context for remote command")
+		}
+		stdout, stderr, err := node.ExecuteCommand(
+			execCtx.NodeIP,
+			execCtx.User,
+			execCtx.InitialPassword, // Using InitialPassword for connection
+			executableCommand,
+		)
+		// Log output regardless of error
+		log.Printf("Remote Command Stdout: %s", stdout)
+		log.Printf("Remote Command Stderr: %s", stderr)
+		if err != nil {
+			return fmt.Errorf("remote command execution failed: %w", err)
+		}
+		log.Println("Remote command finished successfully.")
 	default:
 		return fmt.Errorf("unknown location '%s' for command step", step.Location)
 	}
@@ -175,5 +190,75 @@ func executeExpectStep(step Step, execCtx Context) error {
 	//    return fmt.Errorf("verification failed: expected output to contain '%s'", step.VerifyContains)
 	// }
 
+	return nil
+}
+
+// executeCopyStep handles steps of type TypeCopy
+func executeCopyStep(step Step, execCtx Context) error {
+	// Check for unsupported recursive copy
+	if step.CopyRecursive {
+		return fmt.Errorf("recursive directory copy is not yet implemented")
+	}
+
+	// Validate required fields
+	if step.CopySource == "" || step.CopyDest == "" {
+		return fmt.Errorf("copy_source and copy_dest are required for copy steps")
+	}
+	if execCtx.NodeIP == "" || execCtx.User == "" || execCtx.InitialPassword == "" {
+		return fmt.Errorf("missing node IP, user, or password in context for remote copy")
+	}
+
+	// Apply templating to source and destination paths
+	renderPath := func(pathTemplate string) (string, error) {
+		tmpl, err := template.New("path").Parse(pathTemplate)
+		if err != nil {
+			return "", fmt.Errorf("failed to parse path template '%s': %w", pathTemplate, err)
+		}
+		var pathBuf bytes.Buffer
+		if err := tmpl.Execute(&pathBuf, execCtx); err != nil {
+			return "", fmt.Errorf("failed to execute path template '%s': %w", pathTemplate, err)
+		}
+		return pathBuf.String(), nil
+	}
+
+	sourcePath, err := renderPath(step.CopySource)
+	if err != nil {
+		return err
+	}
+	destPath, err := renderPath(step.CopyDest)
+	if err != nil {
+		return err
+	}
+
+	// Determine local/remote paths based on direction
+	toRemote := !step.CopyFromRemote
+	localPath := sourcePath
+	remotePath := destPath
+	if !toRemote { // Copying From Remote to Local
+		localPath = destPath
+		remotePath = sourcePath
+	}
+
+	direction := "Local -> Remote"
+	if !toRemote {
+		direction = "Remote -> Local"
+	}
+
+	log.Printf("Copying file on node %s (%s): %s -> %s", execCtx.NodeIP, direction, sourcePath, destPath)
+
+	err = node.CopyFile(
+		execCtx.NodeIP,
+		execCtx.User,
+		execCtx.InitialPassword, // Using InitialPassword for connection
+		localPath,               // Actual local path for the function
+		remotePath,              // Actual remote path for the function
+		toRemote,
+	)
+
+	if err != nil {
+		return fmt.Errorf("file copy failed: %w", err)
+	}
+
+	log.Println("File copy finished successfully.")
 	return nil
 }
