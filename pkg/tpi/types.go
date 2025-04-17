@@ -2,12 +2,10 @@ package tpi
 
 import (
 	"context"
-	"io/fs"
 	"os"
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/bmc"
-	"github.com/davidroman0O/turingpi/pkg/tpi/imageops"
 )
 
 // NodeID represents the numeric identifier for a compute node slot.
@@ -185,13 +183,26 @@ type ImageResult struct {
 
 // --- Callback Helper Types --- //
 
-// ImageModifier provides an interface for staging file operations to be applied to an image.
+// ImageModifier provides methods to manipulate the mounted filesystem during the
+// WithPreInstall callback in Phase 1. Operations are typically executed with sudo.
 type ImageModifier interface {
-	WriteFile(relativePath string, data []byte, perm fs.FileMode)
-	CopyLocalFile(localSourcePath, relativeDestPath string)
-	MkdirAll(relativePath string, perm fs.FileMode)
-	Chmod(relativePath string, perm fs.FileMode)
-	GetOperations() []imageops.FileOperation
+	// WriteFile stages an operation to write data to a file within the mounted image filesystem.
+	// path is relative to the image root (e.g., "/etc/hostname").
+	WriteFile(relativePath string, data []byte, perm os.FileMode)
+
+	// CopyLocalFile stages an operation to copy a file from the local machine (running tpi)
+	// into the mounted image filesystem.
+	CopyLocalFile(localSourcePath string, relativeDestPath string)
+
+	// MkdirAll stages an operation to create a directory (including any necessary parents)
+	// within the mounted image filesystem.
+	MkdirAll(relativePath string, perm os.FileMode)
+
+	// Chmod stages an operation to change the permissions of a file or directory within the image.
+	// Needed after CopyLocalFile sometimes.
+	Chmod(relativePath string, perm os.FileMode)
+
+	// TODO: Add other necessary file operations (ReadFile, Remove, etc.)?
 }
 
 // LocalRuntime provides methods to interact with the local filesystem

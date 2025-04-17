@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/davidroman0O/turingpi/pkg/tpi"          // Base tpi types
-	"github.com/davidroman0O/turingpi/pkg/tpi/imageops" // Updated import path
-	"github.com/davidroman0O/turingpi/pkg/tpi/platform" // Platform detection
+	"github.com/davidroman0O/turingpi/pkg/tpi"                   // Base tpi types
+	"github.com/davidroman0O/turingpi/pkg/tpi/internal/imageops" // Internal helpers
+	"github.com/davidroman0O/turingpi/pkg/tpi/platform"          // Platform detection
 )
 
 // UbuntuImageBuilder defines the configuration for Phase 1: Image Customization for Ubuntu.
@@ -21,15 +21,13 @@ type UbuntuImageBuilder struct {
 	preInstallFunc   func(image tpi.ImageModifier) error
 	stagedOperations []imageops.FileOperation // Collected from preInstallFunc
 	outputDirectory  string                   // Custom output directory for prepared images
-	imageOps         imageops.ImageOpsAdapter // Image operations adapter
 }
 
 // NewImageBuilder creates a new builder for customizing an Ubuntu image.
 // It requires the target node ID.
 func NewImageBuilder(nodeID tpi.NodeID) *UbuntuImageBuilder {
 	return &UbuntuImageBuilder{
-		nodeID:   nodeID,
-		imageOps: imageops.NewImageOpsAdapter(),
+		nodeID: nodeID,
 	}
 }
 
@@ -213,7 +211,7 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 
 		// Initialize Docker with proper configuration
 		// Note: We add the output directory as a mount point for Docker to access it
-		err := b.imageOps.InitDockerConfig(filepath.Dir(b.baseImageXZPath), tempWorkDir, b.outputDirectory)
+		err := imageops.InitDockerConfig(filepath.Dir(b.baseImageXZPath), tempWorkDir, b.outputDirectory)
 		if err != nil {
 			return b.failPhase(cluster, fmt.Errorf("failed to initialize Docker: %w", err))
 		}
@@ -251,7 +249,7 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	fmt.Println("Executing image preparation script in Docker...")
 
 	// Execute the preparation
-	outputPath, err := b.imageOps.PrepareImage(prepOpts)
+	outputPath, err := imageops.PrepareImage(prepOpts)
 	if err != nil {
 		return b.failPhase(cluster, fmt.Errorf("image preparation failed: %w", err))
 	}
@@ -340,9 +338,9 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	}
 
 	// --- Clean up Docker resources if used ---
-	if !platform.IsLinux() && b.imageOps.GetDockerAdapter() != nil {
+	if !platform.IsLinux() && imageops.DockerAdapter() != nil {
 		log.Printf("Cleaning up Docker resources...")
-		b.imageOps.GetDockerAdapter().Cleanup()
+		imageops.DockerAdapter().Cleanup()
 	}
 
 	log.Printf("--- Phase 1: %s for Node %d Completed Successfully ---", phaseName, b.nodeID)
