@@ -2,10 +2,12 @@ package platform
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 // OSType represents the operating system type
@@ -72,17 +74,23 @@ type DockerExecutionConfig struct {
 	AdditionalMounts map[string]string
 	// ContainerName is the name to assign to the container for references (e.g., file copying)
 	ContainerName string
+	// UseUniqueContainerName determines whether to generate a unique name for each container
+	UseUniqueContainerName bool
 }
 
 // NewDefaultDockerConfig creates a default Docker execution configuration
 func NewDefaultDockerConfig(sourceDir, tempDir, outputDir string) *DockerExecutionConfig {
+	// Generate a unique identifier based on timestamp and random component
+	uniqueID := fmt.Sprintf("%d-%x", time.Now().UnixNano(), rand.Intn(0x10000))
+
 	return &DockerExecutionConfig{
-		DockerImage:      "ubuntu:22.04",
-		SourceDir:        sourceDir,
-		TempDir:          tempDir,
-		OutputDir:        outputDir,
-		AdditionalMounts: map[string]string{},
-		ContainerName:    "turingpi-image-builder",
+		DockerImage:            "ubuntu:22.04",
+		SourceDir:              sourceDir,
+		TempDir:                tempDir,
+		OutputDir:              outputDir,
+		AdditionalMounts:       map[string]string{},
+		ContainerName:          fmt.Sprintf("turingpi-image-builder-%s", uniqueID),
+		UseUniqueContainerName: true,
 	}
 }
 

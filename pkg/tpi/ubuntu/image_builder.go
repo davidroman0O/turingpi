@@ -94,19 +94,28 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 
 	// --- Validate Builder Config ---
 	if b.baseImageXZPath == "" {
-		return nil, fmt.Errorf("phase 1 validation failed: source image path is required (use WithBaseImage)")
+		return b.failPhase(cluster, fmt.Errorf("base image path is required"))
 	}
-	if b.outputDirectory == "" {
-		return nil, fmt.Errorf("phase 1 validation failed: output directory is required (use WithOutputDirectory)")
-	}
-
 	nodeConfig := cluster.GetNodeConfig(b.nodeID)
 	if nodeConfig == nil {
-		return nil, fmt.Errorf("internal error: node config not found for Node %d", b.nodeID)
+		return b.failPhase(cluster, fmt.Errorf("internal error: node config not found for Node %d", b.nodeID))
+	}
+
+	// Set up a deferred cleanup for Docker resources if needed
+	dockerCleanupNeeded := !platform.IsLinux()
+	defer func() {
+		if dockerCleanupNeeded && imageops.DockerAdapter() != nil {
+			log.Printf("Cleaning up Docker resources in deferred function...")
+			imageops.DockerAdapter().Cleanup()
+		}
+	}()
+
+	if b.outputDirectory == "" {
+		return b.failPhase(cluster, fmt.Errorf("phase 1 validation failed: output directory is required (use WithOutputDirectory)"))
 	}
 
 	if b.networkConfig == nil {
-		return nil, fmt.Errorf("phase 1 validation failed: network configuration is required (use WithNetworkConfig)")
+		return b.failPhase(cluster, fmt.Errorf("phase 1 validation failed: network configuration is required (use WithNetworkConfig)"))
 	}
 
 	// Execute the pre-install function if provided, to stage file operations
@@ -335,12 +344,6 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	err = stateMgr.UpdatePhaseState(b.nodeID, phaseName, tpi.StatusCompleted, inputHash, finalImagePath, nil)
 	if err != nil {
 		log.Printf("Warning: Failed to update state to completed, but phase finished successfully: %v", err)
-	}
-
-	// --- Clean up Docker resources if used ---
-	if !platform.IsLinux() && imageops.DockerAdapter() != nil {
-		log.Printf("Cleaning up Docker resources...")
-		imageops.DockerAdapter().Cleanup()
 	}
 
 	log.Printf("--- Phase 1: %s for Node %d Completed Successfully ---", phaseName, b.nodeID)

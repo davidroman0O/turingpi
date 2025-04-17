@@ -60,11 +60,23 @@ func InitDockerConfig(sourceDir, tempDir, outputDir string) error {
 	fmt.Printf("  tempDir: %s\n", tempDir)
 	fmt.Printf("  outputDir: %s\n", outputDir)
 
+	// Clean up any existing adapter first to avoid resource leaks
+	if dockerAdapter != nil {
+		fmt.Println("Cleaning up existing Docker adapter before creating a new one")
+		dockerAdapter.Cleanup()
+		dockerAdapter = nil
+		DockerConfig = nil
+		DockerContainerID = ""
+	}
+
 	// Create a temporary config first to set the image name
 	config := platform.NewDefaultDockerConfig(sourceDir, tempDir, outputDir)
 
 	// Set the image to turingpi-prepare which triggers special handling
 	config.DockerImage = "turingpi-prepare"
+
+	// Ensure we use a unique container name to avoid conflicts
+	config.UseUniqueContainerName = true
 
 	fmt.Printf("Docker configuration prepared:\n")
 	fmt.Printf("  Image: %s\n", config.DockerImage)
@@ -93,6 +105,9 @@ func InitDockerConfig(sourceDir, tempDir, outputDir string) error {
 
 	if err != nil {
 		// Clear any partially initialized adapter
+		if dockerAdapter != nil {
+			dockerAdapter.Cleanup()
+		}
 		dockerAdapter = nil
 		DockerConfig = nil
 		DockerContainerID = ""
@@ -1533,6 +1548,7 @@ echo "==> Image preparation complete!"
 
 // DockerAdapter returns the current Docker adapter instance
 // Can be used for cleanup after all operations are complete
+// This is safe to call even if the adapter is nil
 func DockerAdapter() *docker.DockerAdapter {
 	return dockerAdapter
 }

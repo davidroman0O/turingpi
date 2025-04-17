@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
 )
 
 func TestNew(t *testing.T) {
@@ -257,5 +259,138 @@ func TestBasicPrepareImage(t *testing.T) {
 
 	if !strings.Contains(output, "test") {
 		t.Errorf("Expected output to contain 'test', got: %s", output)
+	}
+}
+
+func TestContainer_UniqueNames(t *testing.T) {
+	// Skip if Docker is not available
+	if _, err := client.NewClientWithOpts(client.FromEnv); err != nil {
+		t.Skip("Docker not available, skipping test")
+	}
+
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "turingpi-docker-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create two containers with the same base name but unique names enabled
+	config1 := &platform.DockerExecutionConfig{
+		DockerImage:            "ubuntu:22.04",
+		TempDir:                tempDir,
+		ContainerName:          "turingpi-test-container",
+		UseUniqueContainerName: true,
+	}
+
+	config2 := &platform.DockerExecutionConfig{
+		DockerImage:            "ubuntu:22.04",
+		TempDir:                tempDir,
+		ContainerName:          "turingpi-test-container",
+		UseUniqueContainerName: true,
+	}
+
+	// Create first container
+	t.Log("Creating first container...")
+	container1, err := New(config1)
+	if err != nil {
+		t.Fatalf("Failed to create first container: %v", err)
+	}
+	defer container1.Cleanup()
+
+	// Create second container
+	t.Log("Creating second container...")
+	container2, err := New(config2)
+	if err != nil {
+		t.Fatalf("Failed to create second container: %v", err)
+	}
+	defer container2.Cleanup()
+
+	// Verify the containers have different names
+	if container1.Config.ContainerName == container2.Config.ContainerName {
+		t.Errorf("Expected unique container names, but both are: %s", container1.Config.ContainerName)
+	}
+
+	// Verify both names start with the base name
+	if !strings.HasPrefix(container1.Config.ContainerName, "turingpi-test-container-") {
+		t.Errorf("Expected container name to start with base name, got: %s", container1.Config.ContainerName)
+	}
+	if !strings.HasPrefix(container2.Config.ContainerName, "turingpi-test-container-") {
+		t.Errorf("Expected container name to start with base name, got: %s", container2.Config.ContainerName)
+	}
+
+	// Test that both containers can successfully execute a command
+	t.Log("Testing command execution on first container...")
+	output1, err := container1.ExecuteCommand([]string{"echo", "hello from container 1"})
+	if err != nil {
+		t.Errorf("Failed to execute command on first container: %v", err)
+	} else {
+		t.Logf("Container 1 output: %s", output1)
+	}
+
+	t.Log("Testing command execution on second container...")
+	output2, err := container2.ExecuteCommand([]string{"echo", "hello from container 2"})
+	if err != nil {
+		t.Errorf("Failed to execute command on second container: %v", err)
+	} else {
+		t.Logf("Container 2 output: %s", output2)
+	}
+
+	// Test cleanup works properly
+	t.Log("Testing cleanup of first container...")
+	if err := container1.Cleanup(); err != nil {
+		t.Errorf("Failed to clean up first container: %v", err)
+	}
+
+	// Verify container was removed
+	time.Sleep(1 * time.Second) // Give Docker some time to process the removal
+	dockerClient, _ := client.NewClientWithOpts(client.FromEnv)
+	_, err = dockerClient.ContainerInspect(context.Background(), container1.ContainerID)
+	if err == nil {
+		t.Errorf("Container 1 still exists after cleanup")
+	}
+}
+
+func TestContainer_Cleanup(t *testing.T) {
+	// Skip if Docker is not available
+	if _, err := client.NewClientWithOpts(client.FromEnv); err != nil {
+		t.Skip("Docker not available, skipping test")
+	}
+
+	// Create a container with a unique name
+	config := &platform.DockerExecutionConfig{
+		DockerImage:            "ubuntu:22.04",
+		ContainerName:          "turingpi-cleanup-test",
+		UseUniqueContainerName: true,
+	}
+
+	// Create container
+	t.Log("Creating container for cleanup test...")
+	container, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create container: %v", err)
+	}
+
+	// Store the container ID for later verification
+	containerID := container.ContainerID
+
+	// Test cleanup
+	t.Log("Testing cleanup...")
+	if err := container.Cleanup(); err != nil {
+		t.Errorf("Failed to clean up container: %v", err)
+	}
+
+	// Verify container was removed
+	time.Sleep(1 * time.Second) // Give Docker some time to process the removal
+	dockerClient, _ := client.NewClientWithOpts(client.FromEnv)
+	_, err = dockerClient.ContainerInspect(context.Background(), containerID)
+	if err == nil {
+		t.Errorf("Container still exists after cleanup")
+	}
+
+	// Test cleanup with nil ContainerID (shouldn't crash)
+	container.ContainerID = ""
+	if err := container.Cleanup(); err != nil {
+		t.Errorf("Cleanup with empty container ID failed: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -262,6 +263,14 @@ CMD ["sleep", "infinity"]
 
 // createContainer creates a persistent container for running commands
 func (c *Container) createContainer() error {
+	// Generate a unique container name if requested
+	if c.Config.UseUniqueContainerName {
+		// Always generate a new name to ensure uniqueness
+		uniqueID := fmt.Sprintf("%d-%x", time.Now().UnixNano(), rand.Intn(0x10000))
+		c.Config.ContainerName = fmt.Sprintf("%s-%s", c.Config.ContainerName, uniqueID)
+		fmt.Printf("Using unique container name: %s\n", c.Config.ContainerName)
+	}
+
 	// First, check if a container with this name already exists
 	if c.Config.ContainerName != "" {
 		containers, err := c.cli.ContainerList(c.ctx, container.ListOptions{All: true})
@@ -269,9 +278,12 @@ func (c *Container) createContainer() error {
 			return fmt.Errorf("error listing containers: %w", err)
 		}
 
-		for _, existingContainer := range containers {
+		// Check for exact match on container name
+		var existingContainerID string
+		var existingContainerStatus string
+		for _, containerItem := range containers {
 			// Check container names (Docker adds a leading slash to container names)
-			for _, name := range existingContainer.Names {
+			for _, name := range containerItem.Names {
 				// Remove leading slash if present
 				cleanName := name
 				if len(name) > 0 && name[0] == '/' {
@@ -279,26 +291,35 @@ func (c *Container) createContainer() error {
 				}
 
 				if cleanName == c.Config.ContainerName {
-					fmt.Printf("Container with name %s already exists (ID: %s)\n",
-						c.Config.ContainerName, existingContainer.ID)
-
-					// Check if container is running
-					if existingContainer.State == "running" {
-						// Container is running, we can use it
-						fmt.Printf("Using existing running container: %s\n", existingContainer.ID)
-						c.ContainerID = existingContainer.ID
-						return nil
-					} else {
-						// Container exists but is not running
-						// Remove it to create a fresh one
-						fmt.Printf("Removing existing container: %s\n", existingContainer.ID)
-						err := c.cli.ContainerRemove(c.ctx, existingContainer.ID, container.RemoveOptions{Force: true})
-						if err != nil {
-							return fmt.Errorf("error removing existing container: %w", err)
-						}
-					}
+					fmt.Printf("Container with name %s already exists (ID: %s, Status: %s)\n",
+						c.Config.ContainerName, containerItem.ID, containerItem.Status)
+					existingContainerID = containerItem.ID
+					existingContainerStatus = containerItem.Status
 					break
 				}
+			}
+			if existingContainerID != "" {
+				break
+			}
+		}
+
+		// Handle existing container
+		if existingContainerID != "" {
+			// If we're using unique container names, this shouldn't happen.
+			// If it does, regenerate the name with an additional unique component
+			if c.Config.UseUniqueContainerName {
+				// Add another random component to ensure uniqueness
+				extraUnique := fmt.Sprintf("%d-%x", time.Now().UnixNano(), rand.Intn(0x10000))
+				c.Config.ContainerName = fmt.Sprintf("%s-retry-%s", c.Config.ContainerName, extraUnique)
+				fmt.Printf("Container name collision detected despite unique name. Using new name: %s\n", c.Config.ContainerName)
+			} else {
+				// Always remove existing container for consistency, regardless of state
+				fmt.Printf("Removing existing container: %s (Status: %s)\n", existingContainerID, existingContainerStatus)
+				err := c.cli.ContainerRemove(c.ctx, existingContainerID, container.RemoveOptions{Force: true})
+				if err != nil {
+					return fmt.Errorf("error removing existing container: %w", err)
+				}
+				fmt.Printf("Successfully removed existing container: %s\n", existingContainerID)
 			}
 		}
 	}
@@ -351,14 +372,18 @@ func (c *Container) createContainer() error {
 	}
 
 	// If we got here, we need to create a new container
-	// (either the container doesn't exist or we removed an existing one)
-	fmt.Printf("DEBUG: Creating container with image %s and %d volume bindings\n", c.Config.DockerImage, len(binds))
+	fmt.Printf("DEBUG: Creating container '%s' with image %s and %d volume bindings\n",
+		c.Config.ContainerName, c.Config.DockerImage, len(binds))
 	for i, bind := range binds {
 		fmt.Printf("DEBUG: Volume binding %d: %s\n", i+1, bind)
 	}
 
+	// Create the container with a timeout to prevent hangs
+	ctx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
+	defer cancel()
+
 	resp, err := c.cli.ContainerCreate(
-		c.ctx,
+		ctx,
 		&container.Config{
 			Image: c.Config.DockerImage,
 			// Don't set Cmd for turingpi-prepare as it already has an ENTRYPOINT
@@ -380,51 +405,50 @@ func (c *Container) createContainer() error {
 		c.Config.ContainerName,
 	)
 	if err != nil {
-		// If container creation failed, it might be because the container already exists
-		// but wasn't found in our earlier check (race condition)
+		// If container creation failed due to name conflict (despite our earlier check),
+		// try again with a new unique name as a fallback
 		if strings.Contains(err.Error(), "Conflict") || strings.Contains(err.Error(), "already in use") {
-			// Try to find the container by name again
-			containerList, listErr := c.cli.ContainerList(c.ctx, container.ListOptions{All: true})
-			if listErr == nil {
-				for _, containerItem := range containerList {
-					for _, name := range containerItem.Names {
-						cleanName := name
-						if len(name) > 0 && name[0] == '/' {
-							cleanName = name[1:]
-						}
+			fmt.Printf("Container name conflict detected despite our checks. Trying with a new unique name...\n")
+			// Generate a new unique name
+			c.Config.ContainerName = fmt.Sprintf("turingpi-image-builder-%d-%x",
+				time.Now().UnixNano(), rand.Intn(0x10000))
 
-						if cleanName == c.Config.ContainerName {
-							fmt.Printf("Found container with name %s (ID: %s) after creation conflict\n",
-								c.Config.ContainerName, containerItem.ID)
+			// Try again with the new name
+			resp, err = c.cli.ContainerCreate(
+				ctx,
+				&container.Config{
+					Image: c.Config.DockerImage,
+					Cmd:   []string{"sleep", "infinity"},
+					Tty:   true,
+				},
+				&container.HostConfig{
+					Binds:      binds,
+					Privileged: c.Config.DockerImage == "turingpi-prepare",
+				},
+				nil,
+				nil,
+				c.Config.ContainerName,
+			)
 
-							c.ContainerID = containerItem.ID
-
-							// Start the container if it's not running
-							if containerItem.State != "running" {
-								if err := c.cli.ContainerStart(c.ctx, c.ContainerID, container.StartOptions{}); err != nil {
-									return fmt.Errorf("error starting existing container: %w", err)
-								}
-								fmt.Printf("Started existing container: %s\n", c.ContainerID)
-							} else {
-								fmt.Printf("Using existing running container: %s\n", c.ContainerID)
-							}
-
-							return nil
-						}
-					}
-				}
+			if err != nil {
+				return fmt.Errorf("error creating container with fallback name: %w", err)
 			}
+		} else {
+			return fmt.Errorf("error creating container: %w", err)
 		}
-
-		// If we get here, it's a genuine error
-		return fmt.Errorf("error creating container: %w", err)
 	}
 
 	c.ContainerID = resp.ID
-	fmt.Printf("Created new container: %s\n", c.ContainerID)
+	fmt.Printf("Created new container: %s (Name: %s)\n", c.ContainerID, c.Config.ContainerName)
 
-	// Start the container
-	if err := c.cli.ContainerStart(c.ctx, c.ContainerID, container.StartOptions{}); err != nil {
+	// Start the container with a timeout to prevent hangs
+	startCtx, startCancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer startCancel()
+
+	err = c.cli.ContainerStart(startCtx, c.ContainerID, container.StartOptions{})
+	if err != nil {
+		// Try to clean up the container we just created
+		_ = c.cli.ContainerRemove(c.ctx, c.ContainerID, container.RemoveOptions{Force: true})
 		return fmt.Errorf("error starting container: %w", err)
 	}
 
@@ -518,19 +542,45 @@ func (c *Container) CopyFileToContainer(srcPath, destPath string) error {
 
 // Cleanup stops and removes the Docker container
 func (c *Container) Cleanup() error {
-	// Stop container
-	timeout := 10 // seconds
-	err := c.cli.ContainerStop(c.ctx, c.ContainerID, container.StopOptions{Timeout: &timeout})
-	if err != nil {
-		return fmt.Errorf("error stopping container: %w", err)
+	if c.ContainerID == "" {
+		fmt.Println("No container ID to clean up")
+		return nil
 	}
 
-	// Remove container
-	err = c.cli.ContainerRemove(c.ctx, c.ContainerID, container.RemoveOptions{Force: true})
+	fmt.Printf("Cleaning up container %s (Name: %s)...\n", c.ContainerID, c.Config.ContainerName)
+
+	// Create a context with timeout for cleanup operations
+	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer cancel()
+
+	// Check if container exists before trying to stop it
+	_, err := c.cli.ContainerInspect(ctx, c.ContainerID)
 	if err != nil {
-		return fmt.Errorf("error removing container: %w", err)
+		if client.IsErrNotFound(err) {
+			fmt.Printf("Container %s no longer exists, nothing to clean up\n", c.ContainerID)
+			return nil
+		}
+		// For other errors, we still try to remove the container
+		fmt.Printf("Warning: Error inspecting container %s: %v (will still try to remove)\n", c.ContainerID, err)
 	}
 
+	// Stop container with timeout
+	stopTimeout := 10 // seconds
+	stopErr := c.cli.ContainerStop(ctx, c.ContainerID, container.StopOptions{Timeout: &stopTimeout})
+	if stopErr != nil {
+		fmt.Printf("Warning: Error stopping container: %v (will still try to force remove)\n", stopErr)
+		// Continue to removal even if stop fails
+	} else {
+		fmt.Printf("Container %s stopped successfully\n", c.ContainerID)
+	}
+
+	// Remove container with force option to ensure it's removed even if running
+	removeErr := c.cli.ContainerRemove(ctx, c.ContainerID, container.RemoveOptions{Force: true})
+	if removeErr != nil {
+		return fmt.Errorf("error removing container: %w", removeErr)
+	}
+
+	fmt.Printf("Container %s (Name: %s) successfully removed\n", c.ContainerID, c.Config.ContainerName)
 	return nil
 }
 

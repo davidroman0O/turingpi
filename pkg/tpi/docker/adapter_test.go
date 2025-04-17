@@ -53,46 +53,55 @@ func TestNewAdapter(t *testing.T) {
 }
 
 func TestNewAdapterWithConfig(t *testing.T) {
-	// Create test directories
+	// Skip if Docker is not available
+	if !platform.DockerAvailable() {
+		t.Skip("Docker not available, skipping test")
+	}
+
+	// Create temporary directories for test
 	sourceDir, err := os.MkdirTemp("", "turingpi-test-source-*")
 	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
+		t.Fatalf("Failed to create temp source dir: %v", err)
 	}
 	defer os.RemoveAll(sourceDir)
 
 	tempDir, err := os.MkdirTemp("", "turingpi-test-temp-*")
 	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
+		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
 	outputDir, err := os.MkdirTemp("", "turingpi-test-output-*")
 	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
+		t.Fatalf("Failed to create temp output dir: %v", err)
 	}
 	defer os.RemoveAll(outputDir)
 
-	// Create a custom config with a specific image
-	config := platform.NewDefaultDockerConfig(sourceDir, tempDir, outputDir)
-	config.DockerImage = "alpine:latest" // Small image for testing
-	config.ContainerName = "turingpi-test-container"
+	// Create a custom config
+	config := &platform.DockerExecutionConfig{
+		DockerImage:            "alpine:latest",
+		SourceDir:              sourceDir,
+		TempDir:                tempDir,
+		OutputDir:              outputDir,
+		AdditionalMounts:       map[string]string{},
+		ContainerName:          "turingpi-test-container",
+		UseUniqueContainerName: true,
+	}
 
-	// Create adapter with custom config
+	// Create an adapter with the custom config
 	adapter, err := NewAdapterWithConfig(config)
 	if err != nil {
-		t.Fatal("Failed to create Docker adapter with config:", err)
+		t.Fatalf("Failed to create adapter with custom config: %v", err)
 	}
-	if adapter == nil {
-		t.Fatal("Adapter is nil")
-	}
-
-	// Clean up after test
 	defer adapter.Cleanup()
 
-	// Validate adapter properties
-	if adapter.GetContainerName() != "turingpi-test-container" {
-		t.Errorf("Expected container name to be 'turingpi-test-container', got '%s'", adapter.GetContainerName())
+	// The container name should be different from the original name due to uniqueness
+	containerName := adapter.GetContainerName()
+	if !strings.Contains(containerName, "turingpi-test-container-") {
+		t.Errorf("Expected container name to contain 'turingpi-test-container-', got '%s'", containerName)
 	}
+
+	// Check that the container exists
 	if adapter.GetContainerID() == "" {
 		t.Error("Expected container ID to be non-empty")
 	}
@@ -184,5 +193,112 @@ func TestCopyFileToContainer(t *testing.T) {
 	output = strings.TrimSpace(output)
 	if output != testContent {
 		t.Errorf("Expected file content to be '%s', got '%s'", testContent, output)
+	}
+}
+
+func TestDockerAdapter_Lifecycle(t *testing.T) {
+	// Skip if Docker is not available
+	if !platform.DockerAvailable() {
+		t.Skip("Docker not available, skipping test")
+	}
+
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "turingpi-docker-adapter-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a basic adapter
+	adapter, err := NewAdapter(tempDir, tempDir, tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create Docker adapter: %v", err)
+	}
+
+	// Verify it was created correctly
+	if adapter.Container == nil {
+		t.Fatal("Adapter Container field is nil")
+	}
+	if adapter.GetContainerName() == "" {
+		t.Fatal("Container name is empty")
+	}
+	if adapter.GetContainerID() == "" {
+		t.Fatal("Container ID is empty")
+	}
+
+	// Test basic command execution
+	output, err := adapter.ExecuteCommand("echo 'Hello from adapter test'")
+	if err != nil {
+		t.Errorf("Failed to execute command: %v", err)
+	} else {
+		t.Logf("Command output: %s", output)
+	}
+
+	// Test proper cleanup
+	err = adapter.Close()
+	if err != nil {
+		t.Errorf("Failed to close adapter: %v", err)
+	}
+
+	// Verify container was properly nullified
+	if adapter.Container != nil {
+		t.Error("Container was not set to nil after Close()")
+	}
+
+	// Verify operations after close fail gracefully
+	_, err = adapter.ExecuteCommand("echo 'This should fail'")
+	if err == nil {
+		t.Error("Execute after Close() did not return an error")
+	} else {
+		t.Logf("Expected error after close: %v", err)
+	}
+
+	// Test Cleanup convenience method
+	adapter, err = NewAdapter(tempDir, tempDir, tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create Docker adapter for second test: %v", err)
+	}
+
+	// Store container ID for verification
+	containerID := adapter.GetContainerID()
+	if containerID == "" {
+		t.Fatal("Container ID is empty in second test")
+	}
+
+	// Call Cleanup method
+	adapter.Cleanup()
+
+	// Verify the container is gone
+	if adapter.Container != nil {
+		t.Error("Container was not set to nil after Cleanup()")
+	}
+}
+
+func TestDockerAdapter_WithConfig(t *testing.T) {
+	// Skip if Docker is not available
+	if !platform.DockerAvailable() {
+		t.Skip("Docker not available, skipping test")
+	}
+
+	// Create a configuration with unique container naming
+	config := platform.NewDefaultDockerConfig("", "", "")
+	config.UseUniqueContainerName = true
+
+	// Create adapter with custom config
+	adapter, err := NewAdapterWithConfig(config)
+	if err != nil {
+		t.Fatalf("Failed to create adapter with config: %v", err)
+	}
+	defer adapter.Cleanup() // Ensure cleanup happens
+
+	// Verify the container exists
+	if adapter.Container == nil {
+		t.Fatal("Container is nil despite successful creation")
+	}
+
+	// Verify it received a unique name (original + suffix)
+	containerName := adapter.GetContainerName()
+	if !strings.Contains(containerName, "-") {
+		t.Errorf("Expected container name to have a unique suffix with hyphen, got: %s", containerName)
 	}
 }

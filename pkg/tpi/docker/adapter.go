@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
 )
@@ -32,19 +33,39 @@ func NewAdapterWithConfig(config *platform.DockerExecutionConfig) (*DockerAdapte
 		return nil, fmt.Errorf("failed to create Docker container: %w", err)
 	}
 
-	return &DockerAdapter{
+	// Register finalizer to help clean up in case of unexpected termination
+	adapter := &DockerAdapter{
 		Container: container,
-	}, nil
+	}
+
+	// Use runtime finalizer as a safety net (not primary cleanup mechanism)
+	runtime.SetFinalizer(adapter, func(a *DockerAdapter) {
+		if a.Container != nil {
+			fmt.Printf("Warning: Finalizer cleaning up Docker container %s that wasn't properly closed\n",
+				a.Container.ContainerID)
+			a.Container.Cleanup()
+		}
+	})
+
+	return adapter, nil
 }
 
 // ExecuteCommand runs a command in the Docker container
 func (a *DockerAdapter) ExecuteCommand(cmd string) (string, error) {
+	if a.Container == nil {
+		return "", fmt.Errorf("container is nil, adapter may have been closed")
+	}
+
 	// Use bash -c to execute the command as a string to preserve quoting, pipes, etc.
 	return a.Container.ExecuteCommand([]string{"bash", "-c", cmd})
 }
 
 // CopyFileToContainer copies a file from the host to the container
 func (a *DockerAdapter) CopyFileToContainer(localPath, containerPath string) error {
+	if a.Container == nil {
+		return fmt.Errorf("container is nil, adapter may have been closed")
+	}
+
 	// Make sure both paths are specified
 	if localPath == "" || containerPath == "" {
 		return fmt.Errorf("both localPath and containerPath must be specified")
@@ -71,11 +92,25 @@ func (a *DockerAdapter) CopyFileToContainer(localPath, containerPath string) err
 	return nil
 }
 
-// Cleanup cleans up Docker resources
+// Cleanup cleans up Docker resources (convenience method, doesn't return error)
 func (a *DockerAdapter) Cleanup() {
-	if a.Container != nil {
-		a.Container.Cleanup()
+	if err := a.Close(); err != nil {
+		fmt.Printf("Warning: Error during Docker cleanup: %v\n", err)
 	}
+}
+
+// Close properly cleans up Docker resources and returns any error
+// This is the preferred method to call explicitly when done with the adapter
+func (a *DockerAdapter) Close() error {
+	if a.Container == nil {
+		return nil // Already closed or never initialized
+	}
+
+	err := a.Container.Cleanup()
+	// Set Container to nil to prevent double cleanup and mark as closed
+	a.Container = nil
+
+	return err
 }
 
 // GetContainerID returns the ID of the current Docker container
