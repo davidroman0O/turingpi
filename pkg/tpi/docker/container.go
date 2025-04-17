@@ -233,8 +233,8 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /workspace
 
-# Keep container running
-ENTRYPOINT ["sleep", "infinity"]
+# Default command - will be overridden when exec is used
+CMD ["sleep", "infinity"]
 `
 
 	// Write the Dockerfile to the temporary directory
@@ -308,6 +308,13 @@ func (c *Container) createContainer() error {
 
 	// Special handling for turingpi-prepare to maintain compatibility with old code
 	if c.Config.DockerImage == "turingpi-prepare" {
+		// Create directory if it doesn't exist
+		if c.Config.TempDir != "" {
+			if err := os.MkdirAll(c.Config.TempDir, 0755); err != nil {
+				fmt.Printf("Warning: Failed to create temp directory %s: %v\n", c.Config.TempDir, err)
+			}
+		}
+
 		binds = []string{
 			fmt.Sprintf("%s:/images:ro", c.Config.SourceDir),
 			fmt.Sprintf("%s:/tmp", c.Config.TempDir),
@@ -338,8 +345,14 @@ func (c *Container) createContainer() error {
 		c.ctx,
 		&container.Config{
 			Image: c.Config.DockerImage,
-			Cmd:   []string{"sleep", "infinity"}, // Keep container running
-			Tty:   true,
+			// Don't set Cmd for turingpi-prepare as it already has an ENTRYPOINT
+			Cmd: func() []string {
+				if c.Config.DockerImage == "turingpi-prepare" {
+					return nil // Don't specify CMD for turingpi-prepare
+				}
+				return []string{"sleep", "infinity"} // For other images
+			}(),
+			Tty: true,
 		},
 		&container.HostConfig{
 			Binds: binds,
