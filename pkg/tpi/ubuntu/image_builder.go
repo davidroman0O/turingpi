@@ -94,26 +94,38 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 
 	// --- Validate Builder Config ---
 	if b.baseImageXZPath == "" {
-		return nil, fmt.Errorf("phase 1 validation failed: WithBaseImage is required")
+		return nil, fmt.Errorf("phase 1 validation failed: source image path is required (use WithBaseImage)")
 	}
-	if b.networkConfig == nil {
-		return nil, fmt.Errorf("phase 1 validation failed: WithNetworkConfig is required")
+	if b.outputDirectory == "" {
+		return nil, fmt.Errorf("phase 1 validation failed: output directory is required (use WithOutputDirectory)")
 	}
+
 	nodeConfig := cluster.GetNodeConfig(b.nodeID)
 	if nodeConfig == nil {
 		return nil, fmt.Errorf("internal error: node config not found for Node %d", b.nodeID)
 	}
 
-	// --- Execute PreInstall Callback to Stage Operations ---
-	modifier := tpi.NewImageModifierImpl()
+	if b.networkConfig == nil {
+		return nil, fmt.Errorf("phase 1 validation failed: network configuration is required (use WithNetworkConfig)")
+	}
+
+	// Execute the pre-install function if provided, to stage file operations
+	log.Printf("Executing pre-install callback to stage file operations...")
+	b.stagedOperations = []imageops.FileOperation{} // Reset operations before collection
+
+	// Create a fresh image modifier for the pre-install callback
+	imageModifier := tpi.NewImageModifierImpl()
+
+	// If preInstallFunc was provided, call it
 	if b.preInstallFunc != nil {
-		log.Println("Executing pre-install callback to stage file operations...")
-		if err := b.preInstallFunc(modifier); err != nil {
+		if err := b.preInstallFunc(imageModifier); err != nil {
 			return nil, fmt.Errorf("pre-install callback failed: %w", err)
 		}
-		b.stagedOperations = modifier.GetOperations()
-		log.Printf("Staged %d file operations from pre-install callback.", len(b.stagedOperations))
 	}
+
+	// Collect the operations from the modifier
+	b.stagedOperations = imageModifier.GetOperations()
+	log.Printf("Staged %d file operations from pre-install callback.", len(b.stagedOperations))
 
 	// --- Calculate Input Hash ---
 	inputHash, err := b.calculateInputHash()
@@ -126,15 +138,27 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	stateMgr := cluster.GetStateManager()
 	currentState := stateMgr.GetNodeState(b.nodeID).ImageCustomization
 
-	if currentState.Status == tpi.StatusCompleted && currentState.InputHash == inputHash {
-		log.Printf("Phase 1 already completed with matching inputs. Skipping execution.")
-		log.Printf("Using cached image: %s", currentState.OutputImagePath)
-		return &tpi.ImageResult{
-			ImagePath: currentState.OutputImagePath,
-			Board:     nodeConfig.Board,
-			InputHash: inputHash,
-		}, nil
+	if currentState.Status == tpi.StatusCompleted &&
+		currentState.InputHash == inputHash &&
+		currentState.OutputImagePath != "" {
+		// If completed with the same inputs and we have the output path
+		log.Printf("Phase 1 already completed with matching inputs. Using cached image: %s",
+			currentState.OutputImagePath)
+
+		// Check if the cached output actually exists
+		if _, err := os.Stat(currentState.OutputImagePath); err == nil {
+			// Return the cached result
+			return &tpi.ImageResult{
+				ImagePath: currentState.OutputImagePath,
+				Board:     nodeConfig.Board,
+				InputHash: inputHash,
+			}, nil
+		} else {
+			log.Printf("Warning: Cached image file %s not found, will rebuild",
+				currentState.OutputImagePath)
+		}
 	}
+
 	if currentState.Status == tpi.StatusRunning {
 		return nil, fmt.Errorf("phase 1 is already marked as running for node %d (state timestamp: %s). Manual intervention might be required", b.nodeID, currentState.Timestamp)
 	}
@@ -145,160 +169,195 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 		return nil, fmt.Errorf("failed to update state to running: %w", err)
 	}
 
-	// --- Prepare Paths ---
-	sourceImgXZAbs, err := filepath.Abs(b.baseImageXZPath)
+	// --- Prepare Output Path ---
+	log.Printf("Using custom output directory for prepared image: %s", b.outputDirectory)
+
+	// Ensure the output directory exists
+	if err := os.MkdirAll(b.outputDirectory, 0755); err != nil {
+		return b.failPhase(cluster, fmt.Errorf("failed to create output directory: %w", err))
+	}
+
+	// Generate output filename based on hostname from network config
+	hostname := b.networkConfig.Hostname
+	if hostname == "" {
+		hostname = fmt.Sprintf("node%d", b.nodeID)
+	}
+
+	outputFilename := fmt.Sprintf("%s.img.xz", hostname)
+	finalImagePath := filepath.Join(b.outputDirectory, outputFilename)
+	log.Printf("Final prepared image will be saved to: %s", finalImagePath)
+
+	// --- Set Up Temporary Directory ---
+	// First, check if cluster has a configured temp dir
+	tempDir := cluster.GetPrepImageDir()
+	if tempDir == "" {
+		// Fallback to system temp dir
+		tempDir = os.TempDir()
+	}
+	log.Printf("Using configured temporary processing directory: %s", tempDir)
+
+	// Create a unique temporary directory for this run
+	tempWorkDir, err := os.MkdirTemp(tempDir, fmt.Sprintf("tpi-img-prep-node%d-", b.nodeID))
 	if err != nil {
-		return nil, b.failPhase(cluster, fmt.Errorf("failed to get absolute path for source image: %w", err))
+		return b.failPhase(cluster, fmt.Errorf("failed to create temporary directory: %w", err))
 	}
-	if _, err := os.Stat(sourceImgXZAbs); os.IsNotExist(err) {
-		return nil, b.failPhase(cluster, fmt.Errorf("source image '%s' not found", sourceImgXZAbs))
-	}
+	log.Printf("Created temporary directory: %s", tempWorkDir)
+	defer os.RemoveAll(tempWorkDir) // Clean up after ourselves
 
-	safeHostname := strings.ReplaceAll(b.networkConfig.Hostname, "/", "_")
-	safeHostname = strings.ReplaceAll(safeHostname, "\\", "_")
-	outputFilename := fmt.Sprintf("%s.img.xz", safeHostname)
-
-	// Determine the final output directory for the prepared image
-	// This is where the completed, customized image will be placed
-	var outputDir string
-	if b.outputDirectory != "" {
-		// Use the explicitly set output directory if provided
-		if err := os.MkdirAll(b.outputDirectory, 0755); err != nil {
-			return nil, b.failPhase(cluster, fmt.Errorf("failed to create output directory '%s': %w", b.outputDirectory, err))
-		}
-		outputDir = b.outputDirectory
-		log.Printf("Using custom output directory for prepared image: %s", outputDir)
-	} else {
-		// Fall back to cache dir if no explicit output directory is set
-		outputDir = cluster.GetCacheDir()
-		log.Printf("Using cache directory for prepared image: %s", outputDir)
-	}
-	preparedImageXZPath := filepath.Join(outputDir, outputFilename)
-	log.Printf("Final prepared image will be saved to: %s", preparedImageXZPath)
-
-	// Determine the temporary working directory for image processing
-	// This is where all the temporary files (decompressed image, mounts, etc.) will be created
-	var tmpDirBase string
-	if prepDir := cluster.GetPrepImageDir(); prepDir != "" {
-		// Use the configured preparation directory for temporary files
-		if err := os.MkdirAll(prepDir, 0755); err != nil {
-			return nil, b.failPhase(cluster, fmt.Errorf("failed to create temporary image processing directory '%s': %w", prepDir, err))
-		}
-		tmpDirBase = prepDir
-		log.Printf("Using configured temporary processing directory: %s", tmpDirBase)
-	} else {
-		// If no specific temporary directory is configured, use the system's temp directory
-		tmpDirBase = os.TempDir()
-		log.Printf("Using system temporary directory: %s", tmpDirBase)
-	}
-
-	// Create a unique temporary directory within the base temporary directory
-	tmpDir, err := os.MkdirTemp(tmpDirBase, fmt.Sprintf("tpi-img-prep-node%d-*", b.nodeID))
-	if err != nil {
-		return nil, b.failPhase(cluster, fmt.Errorf("failed to create temporary directory: %w", err))
-	}
-	log.Printf("Created temporary directory: %s", tmpDir)
-	mountDir := filepath.Join(tmpDir, "mnt")
-
-	// Check if we're running on a non-Linux platform and need Docker
+	// --- Configure Docker if Needed ---
+	// If we're not on Linux, we need to use Docker
 	if !platform.IsLinux() {
-		log.Println("Detected non-Linux platform, will use Docker for image operations")
-		// Check if Docker is available
-		if !platform.DockerAvailable() {
-			return nil, b.failPhase(cluster, fmt.Errorf("Docker is required for image operations on non-Linux platforms but is not available"))
+		log.Printf("Detected non-Linux platform, will use Docker for image operations")
+
+		// Initialize Docker with proper configuration
+		// Note: We add the output directory as a mount point for Docker to access it
+		err := imageops.InitDockerConfig(filepath.Dir(b.baseImageXZPath), tempWorkDir, b.outputDirectory)
+		if err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to initialize Docker: %w", err))
 		}
-
-		// Get the source image directory (parent directory of the image file)
-		sourceDir := filepath.Dir(sourceImgXZAbs)
-
-		// Initialize Docker configuration for image operations
-		imageops.InitDockerConfig(sourceDir, tmpDir, outputDir)
-		log.Println("Docker configuration initialized for image operations")
+		log.Printf("Docker configuration initialized for image operations")
 	}
 
-	var decompressedImgPath string
-	var rootPartitionDevice string
-	defer func(dirToClean string) {
-		log.Printf("--- Starting deferred cleanup for Phase 1 (Node %d) ---", b.nodeID)
-		if mountDir != "" && rootPartitionDevice != "" {
-			_ = imageops.UnmountFilesystem(mountDir)
-		}
-		if decompressedImgPath != "" {
-			_ = imageops.CleanupPartitions(decompressedImgPath)
-		}
-		log.Printf("Removing temporary directory %s...", dirToClean)
-		if err := os.RemoveAll(dirToClean); err != nil {
-			log.Printf("Warning: Failed to remove temporary directory %s: %v", dirToClean, err)
-		} else {
-			log.Println("Temporary directory removed.")
-		}
-		log.Println("--- Finished deferred cleanup ---")
-	}(tmpDir)
+	// --- Execute Image Preparation ---
+	ipWithoutCIDR := b.networkConfig.IPCIDR
+	cidrIdx := strings.Index(ipWithoutCIDR, "/")
+	if cidrIdx > 0 {
+		ipWithoutCIDR = ipWithoutCIDR[:cidrIdx]
+	}
 
-	// --- Execute Image Operations (using internal/imageops) ---
-	decompressedImgPath, err = imageops.DecompressImageXZ(sourceImgXZAbs, tmpDir)
+	cidrSuffix := ""
+	if cidrIdx > 0 {
+		cidrSuffix = b.networkConfig.IPCIDR[cidrIdx:]
+	} else {
+		cidrSuffix = "/24" // Default if no CIDR provided
+	}
+
+	// Prepare image prep options
+	prepOpts := imageops.PrepareImageOptions{
+		SourceImgXZ:  b.baseImageXZPath,
+		NodeNum:      int(b.nodeID),
+		IPAddress:    ipWithoutCIDR,
+		IPCIDRSuffix: cidrSuffix,
+		Hostname:     b.networkConfig.Hostname,
+		Gateway:      b.networkConfig.Gateway,
+		DNSServers:   b.networkConfig.DNSServers,
+		OutputDir:    b.outputDirectory,
+		TempDir:      tempWorkDir,
+	}
+
+	log.Printf("Running on non-Linux platform, using Docker")
+	fmt.Println("Executing image preparation script in Docker...")
+
+	// Execute the preparation
+	outputPath, err := imageops.PrepareImage(prepOpts)
 	if err != nil {
-		return nil, b.failPhase(cluster, fmt.Errorf("decompression failed: %w", err))
+		return b.failPhase(cluster, fmt.Errorf("image preparation failed: %w", err))
 	}
 
-	rootPartitionDevice, err = imageops.MapPartitions(decompressedImgPath)
-	if err != nil {
-		return nil, b.failPhase(cluster, fmt.Errorf("partition mapping failed: %w", err))
-	}
+	fmt.Printf("Docker preparation completed successfully. Output: %s\n", outputPath)
+	finalImagePath = outputPath // Use the path returned by PrepareImage
 
-	if err := imageops.MountFilesystem(rootPartitionDevice, mountDir); err != nil {
-		return nil, b.failPhase(cluster, fmt.Errorf("filesystem mounting failed: %w", err))
-	}
+	log.Printf("Image preparation completed successfully: %s", finalImagePath)
 
-	if err := imageops.ApplyNetworkConfig(mountDir, b.networkConfig.Hostname, b.networkConfig.IPCIDR, b.networkConfig.Gateway, b.networkConfig.DNSServers); err != nil {
-		return nil, b.failPhase(cluster, fmt.Errorf("applying network config failed: %w", err))
-	}
-
+	// --- Apply Pre-Install File Operations (if any) ---
 	if len(b.stagedOperations) > 0 {
-		fileOpParams := imageops.ExecuteFileOperationsParams{
+		log.Printf("Applying %d pre-install file operations...", len(b.stagedOperations))
+
+		// 1. Decompress the image for file operations
+		tempDir := tempWorkDir
+		decompImgPath, err := imageops.DecompressImageXZ(finalImagePath, tempDir)
+		if err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to decompress for file ops: %w", err))
+		}
+
+		// 2. Map and mount the partitions
+		rootPartDev, err := imageops.MapPartitions(decompImgPath)
+		if err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to map partitions for file ops: %w", err))
+		}
+
+		// Ensure we clean up when done
+		defer func() {
+			_ = imageops.CleanupPartitions(decompImgPath)
+		}()
+
+		// 3. Mount the filesystem
+		mountDir := filepath.Join(tempDir, "mnt")
+		if err := os.MkdirAll(mountDir, 0755); err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to create mount dir for file ops: %w", err))
+		}
+
+		err = imageops.MountFilesystem(rootPartDev, mountDir)
+		if err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to mount filesystem for file ops: %w", err))
+		}
+
+		// Ensure we unmount when done
+		defer func() {
+			_ = imageops.UnmountFilesystem(mountDir)
+		}()
+
+		// 4. Execute the staged file operations
+		fileOpsParams := imageops.ExecuteFileOperationsParams{
 			MountDir:   mountDir,
 			Operations: b.stagedOperations,
 		}
-		if err := imageops.ExecuteFileOperations(fileOpParams); err != nil {
-			return nil, b.failPhase(cluster, fmt.Errorf("executing file operations failed: %w", err))
+
+		err = imageops.ExecuteFileOperations(fileOpsParams)
+		if err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to apply file operations: %w", err))
 		}
-	} else {
-		log.Println("No pre-install file operations were staged.")
+
+		// 5. Unmount and cleanup
+		if err := imageops.UnmountFilesystem(mountDir); err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to unmount filesystem: %w", err))
+		}
+
+		if err := imageops.CleanupPartitions(decompImgPath); err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to cleanup partitions: %w", err))
+		}
+
+		// 6. Recompress the image
+		modifiedImgName := filepath.Base(decompImgPath)
+		xzImgName := modifiedImgName + ".xz"
+		finalXZPath := filepath.Join(b.outputDirectory, xzImgName)
+
+		err = imageops.RecompressImageXZ(decompImgPath, finalXZPath)
+		if err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to recompress image: %w", err))
+		}
+
+		// Update the final image path to the recompressed version
+		finalImagePath = finalXZPath
 	}
 
-	if err := imageops.UnmountFilesystem(mountDir); err != nil {
-		log.Printf("Warning: Unmount failed during main execution: %v", err)
-	}
-
-	if err := imageops.CleanupPartitions(decompressedImgPath); err != nil {
-		log.Printf("Warning: Kpartx cleanup failed during main execution: %v", err)
-	}
-
-	if err := imageops.RecompressImageXZ(decompressedImgPath, preparedImageXZPath); err != nil {
-		return nil, b.failPhase(cluster, fmt.Errorf("recompression failed: %w", err))
-	}
-
-	// --- Mark State as Completed ---
-	err = stateMgr.UpdatePhaseState(b.nodeID, phaseName, tpi.StatusCompleted, inputHash, preparedImageXZPath, nil)
+	// --- Update State to Completed ---
+	err = stateMgr.UpdatePhaseState(b.nodeID, phaseName, tpi.StatusCompleted, inputHash, finalImagePath, nil)
 	if err != nil {
-		log.Printf("Warning: Failed to update state to completed, but phase finished: %v", err)
+		log.Printf("Warning: Failed to update state to completed, but phase finished successfully: %v", err)
 	}
 
-	log.Printf("--- Finished Phase 1: %s for Node %d ---", phaseName, b.nodeID)
-	log.Printf("Output image: %s", preparedImageXZPath)
+	// --- Clean up Docker resources if used ---
+	if !platform.IsLinux() && imageops.DockerAdapter() != nil {
+		log.Printf("Cleaning up Docker resources...")
+		imageops.DockerAdapter().Cleanup()
+	}
 
+	log.Printf("--- Phase 1: %s for Node %d Completed Successfully ---", phaseName, b.nodeID)
+
+	// --- Return Results ---
 	return &tpi.ImageResult{
-		ImagePath: preparedImageXZPath,
+		ImagePath: finalImagePath,
 		Board:     nodeConfig.Board,
 		InputHash: inputHash,
 	}, nil
 }
 
 // failPhase is a helper to update state on failure and return the error.
-func (b *UbuntuImageBuilder) failPhase(cluster tpi.Cluster, err error) error {
+func (b *UbuntuImageBuilder) failPhase(cluster tpi.Cluster, err error) (*tpi.ImageResult, error) {
 	phaseName := "ImageCustomization"
 	log.Printf("--- Error in Phase 1: %s for Node %d ---", phaseName, b.nodeID)
 	log.Printf("Error details: %v", err)
 	_ = cluster.GetStateManager().UpdatePhaseState(b.nodeID, phaseName, tpi.StatusFailed, "", "", err)
-	return err
+	return nil, err
 }

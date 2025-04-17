@@ -45,6 +45,7 @@ func (r *localRuntimeImpl) RunCommand(command string, timeout time.Duration) (st
 type UbuntuPostInstallerBuilder struct {
 	nodeID         tpi.NodeID
 	actionsFunc    func(local tpi.LocalRuntime, remote tpi.UbuntuRuntime) error
+	ubuntuUser     string // Default Ubuntu username for SSH connection
 	ubuntuPassword string // Default Ubuntu user password for SSH connection
 }
 
@@ -52,7 +53,8 @@ type UbuntuPostInstallerBuilder struct {
 // It requires the node ID.
 func NewPostInstaller(nodeID tpi.NodeID) *UbuntuPostInstallerBuilder {
 	return &UbuntuPostInstallerBuilder{
-		nodeID: nodeID,
+		nodeID:     nodeID,
+		ubuntuUser: "ubuntu", // Default username
 	}
 }
 
@@ -61,6 +63,12 @@ func NewPostInstaller(nodeID tpi.NodeID) *UbuntuPostInstallerBuilder {
 // and a UbuntuRuntime for remote SSH operations on the target node.
 func (b *UbuntuPostInstallerBuilder) RunActions(actionsFunc func(local tpi.LocalRuntime, remote tpi.UbuntuRuntime) error) *UbuntuPostInstallerBuilder {
 	b.actionsFunc = actionsFunc
+	return b
+}
+
+// WithUser sets the username for SSH connection
+func (b *UbuntuPostInstallerBuilder) WithUser(username string) *UbuntuPostInstallerBuilder {
+	b.ubuntuUser = username
 	return b
 }
 
@@ -84,6 +92,9 @@ func (b *UbuntuPostInstallerBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) e
 	// --- Validate Builder Config ---
 	if b.actionsFunc == nil {
 		return fmt.Errorf("phase 3 validation failed: RunActions function is required")
+	}
+	if b.ubuntuUser == "" {
+		return fmt.Errorf("phase 3 validation failed: WithUser is required for SSH connection")
 	}
 	if b.ubuntuPassword == "" {
 		return fmt.Errorf("phase 3 validation failed: WithPassword is required for SSH connection")
@@ -129,7 +140,7 @@ func (b *UbuntuPostInstallerBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) e
 	}
 
 	// Create runtime instances
-	remoteRuntime := newUbuntuRuntime(ipAddress, "ubuntu", b.ubuntuPassword)
+	remoteRuntime := newUbuntuRuntime(ipAddress, b.ubuntuUser, b.ubuntuPassword)
 
 	// Execute the user-provided function
 	actionsErr := b.actionsFunc(localRuntime, remoteRuntime)

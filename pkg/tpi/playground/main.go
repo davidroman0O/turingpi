@@ -136,10 +136,22 @@ func main() {
 
 		// --- Phase 2: OS Installation ---
 		log.Println("Executing Phase 2: OS Installation...")
+
+		// Generate a generic config with SSH keys (or hardcode a public key)
+		// In a real application, you would use your own SSH keys or generate them
+		sshPublicKey := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCxuZZ1rJJMxuZ0HYW/FZFvd1Y4PT1CUdZmY/1jizwEXxIJ9lpI3laA5hxopV4dUYEQhkj7AcjHLcZCBOKhV0WcqGsJXpqHpiWlk1YEWxwQHPx46gejHi2VL/UBusMw+YMGH/P3p+s8h5LbgFwkIzYxzRbVJNJYv1gOxnQPV7+XnHU5FO+dRN1M4sMt5gGAq0OlU6f1a1+z2zCdHGwXDKVOqWGzGME6v2FVuK32N5c+8XY0kZdXxL8VxmXvFbZIa1wRcYAaohwGhnC4+GrZhJFp9hgzH8nPDLpKAizO9yw7cjZ4KjfRlZanGNQ7GTnQkwGH0D6zLGe0B0L6Q3KAxTmJ turing@example.com"
+
+		genericConfig := tpi.OSInstallConfig{
+			SSHKeys: []string{sshPublicKey},
+		}
+
 		ubuntuInstaller := ubuntu.NewOSInstaller(node.ID, tpi.UbuntuInstallConfig{
 			// Default Ubuntu password
 			InitialUserPassword: "ubuntu",
 		})
+
+		// Add the generic config with SSH keys
+		ubuntuInstaller = ubuntuInstaller.WithGenericConfig(genericConfig)
 
 		// Provide the image from Phase 1 and run installation
 		err = ubuntuInstaller.UsingImage(imageResult).Run(ctx, cluster)
@@ -150,7 +162,12 @@ func main() {
 
 		// --- Phase 3: Post-Install Configuration ---
 		log.Println("Executing Phase 3: Post-Installation Configuration...")
+
+		// Note: Password change is already handled by OS installer
+		// We'll use the new password set during OS installation
 		postInstaller := ubuntu.NewPostInstaller(node.ID)
+		postInstaller = postInstaller.WithUser("ubuntu")           // Default Ubuntu username
+		postInstaller = postInstaller.WithPassword("TuringPi123!") // Password set during OS installation
 
 		// Define the post-installation actions
 		postInstaller = postInstaller.RunActions(func(local tpi.LocalRuntime, remote tpi.UbuntuRuntime) error {
@@ -170,40 +187,10 @@ func main() {
 				return fmt.Errorf("failed to create local report file: %w", err)
 			}
 
-			if err := remote.CopyFile(reportPath, "/opt/turingpi/install_report.txt", true); err != nil {
+			// Upload to the ubuntu user's home directory instead of /opt/turingpi
+			if err := remote.CopyFile(reportPath, "/home/ubuntu/install_report.txt", true); err != nil {
 				return fmt.Errorf("failed to upload report to node: %w", err)
 			}
-
-			// Example 3: Install and configure some standard services
-			// // Update package index
-			// _, _, err = remote.RunCommand("sudo apt update", 30*time.Second)
-			// if err != nil {
-			// 	log.Printf("Warning: APT update failed: %v", err)
-			// 	// Continue despite error
-			// }
-
-			// // Install common utilities that exist in standard Ubuntu
-			// _, _, err = remote.RunCommand("sudo apt install -y openssh-server fail2ban htop iotop", 2*time.Minute)
-			// if err != nil {
-			// 	log.Printf("Warning: Package installation failed: %v", err)
-			// 	// Continue despite error
-			// } else {
-			// 	log.Println("Common utilities installed successfully")
-			// }
-
-			// // Configure SSH server to be more secure
-			// _, _, err = remote.RunCommand("sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config", 10*time.Second)
-			// if err != nil {
-			// 	log.Printf("Warning: SSH configuration failed: %v", err)
-			// 	// Continue despite error
-			// }
-
-			// // Restart SSH service (standard service on Ubuntu)
-			// _, _, err = remote.RunCommand("sudo systemctl restart ssh", 10*time.Second)
-			// if err != nil {
-			// 	log.Printf("Warning: SSH service restart failed: %v", err)
-			// 	// Continue despite error
-			// }
 
 			return nil
 		})

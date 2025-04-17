@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/bmc"
+	"github.com/davidroman0O/turingpi/pkg/node"
 	"github.com/davidroman0O/turingpi/pkg/tpi" // Base tpi types
 	// TODO: Need bmc package for actual flashing
 	// "github.com/davidroman0O/turingpi/pkg/bmc"
@@ -229,6 +230,68 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 	}
 
 	log.Println("[flashRK1] Node power cycled.")
+
+	// 6. Handle the mandatory initial password change
+	// Get node IP from the configuration
+	nodeConfig := cluster.GetNodeConfig(b.nodeID)
+	if nodeConfig == nil {
+		return fmt.Errorf("internal error: node config not found for Node %d", b.nodeID)
+	}
+
+	// Get the IP without CIDR suffix
+	ipAddress := nodeConfig.IP
+	if idx := strings.Index(ipAddress, "/"); idx != -1 {
+		ipAddress = ipAddress[:idx] // Remove CIDR notation if present
+	}
+
+	// Wait for the node to boot and initialize SSH service
+	log.Printf("[flashRK1] Waiting for node %s to boot and initialize SSH service (60s)...", nodeStr)
+	time.Sleep(60 * time.Second)
+
+	// Get credentials from installation config
+	initialPassword := b.installConfig.InitialUserPassword
+	if initialPassword == "" {
+		initialPassword = "ubuntu" // Default fallback
+	}
+
+	// Define new password - use a secure password that meets requirements
+	// If no password is specified, generate one
+	newPassword := "TuringPi123!" // Example secure password
+
+	// Import node pkg for SSH interaction
+	log.Printf("[flashRK1] Attempting to connect to node and handle initial password change...")
+
+	// Use node.ExpectAndSend to handle the interactive password change
+	// This is similar to what post_install_ubuntu.go does
+	steps := []node.InteractionStep{
+		{Expect: "Current password:", Send: initialPassword, LogMsg: "Sending initial password..."},
+		{Expect: "New password:", Send: newPassword, LogMsg: "Sending new password..."},
+		{Expect: "Retype new password:", Send: newPassword, LogMsg: "Retyping new password..."},
+	}
+	interactionTimeout := 30 * time.Second
+
+	finalOutput, err := node.ExpectAndSend(
+		ipAddress,
+		"ubuntu", // Default Ubuntu username
+		initialPassword,
+		steps,
+		interactionTimeout,
+	)
+	if err != nil {
+		log.Printf("[flashRK1] Password change interaction failed: %v", err)
+		log.Printf("[flashRK1] Final output: %s", node.GetLastLines(finalOutput, 15))
+		return fmt.Errorf("password change failed after flashing: %w", err)
+	}
+
+	// Verify success in output
+	if !strings.Contains(finalOutput, "passwd: password updated successfully") {
+		log.Printf("[flashRK1] Password change did not report success. Output: %s", finalOutput)
+		return fmt.Errorf("password change did not complete successfully after flashing")
+	}
+
+	log.Printf("[flashRK1] Password successfully changed to: %s", newPassword)
+	log.Printf("[flashRK1] Node is now accessible at %s with username 'ubuntu' and the new password", ipAddress)
+
 	log.Println("[flashRK1] RK1 flashing process finished.")
 	return nil
 }

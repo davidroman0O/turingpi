@@ -315,6 +315,11 @@ func (c *Container) createContainer() error {
 			}
 		}
 
+		fmt.Printf("DEBUG: Setting up mounts for turingpi-prepare image\n")
+		fmt.Printf("DEBUG: Source Dir: %s -> /images:ro\n", c.Config.SourceDir)
+		fmt.Printf("DEBUG: Temp Dir: %s -> /tmp\n", c.Config.TempDir)
+		fmt.Printf("DEBUG: Output Dir: %s -> /prepared-images\n", c.Config.OutputDir)
+
 		binds = []string{
 			fmt.Sprintf("%s:/images:ro", c.Config.SourceDir),
 			fmt.Sprintf("%s:/tmp", c.Config.TempDir),
@@ -322,25 +327,36 @@ func (c *Container) createContainer() error {
 		}
 	} else {
 		// Standard mounts for other images
+		fmt.Printf("DEBUG: Setting up standard mounts for image: %s\n", c.Config.DockerImage)
+
 		// Add the standard mounts (source, temp, output directories)
 		if c.Config.SourceDir != "" {
+			fmt.Printf("DEBUG: Source Dir: %s -> /source:ro\n", c.Config.SourceDir)
 			binds = append(binds, fmt.Sprintf("%s:/source:ro", c.Config.SourceDir))
 		}
 		if c.Config.TempDir != "" {
+			fmt.Printf("DEBUG: Temp Dir: %s -> /tmp\n", c.Config.TempDir)
 			binds = append(binds, fmt.Sprintf("%s:/tmp", c.Config.TempDir))
 		}
 		if c.Config.OutputDir != "" {
+			fmt.Printf("DEBUG: Output Dir: %s -> /output\n", c.Config.OutputDir)
 			binds = append(binds, fmt.Sprintf("%s:/output", c.Config.OutputDir))
 		}
 	}
 
 	// Add any additional mounts
 	for hostPath, containerPath := range c.Config.AdditionalMounts {
+		fmt.Printf("DEBUG: Additional mount: %s -> %s\n", hostPath, containerPath)
 		binds = append(binds, fmt.Sprintf("%s:%s", hostPath, containerPath))
 	}
 
 	// If we got here, we need to create a new container
 	// (either the container doesn't exist or we removed an existing one)
+	fmt.Printf("DEBUG: Creating container with image %s and %d volume bindings\n", c.Config.DockerImage, len(binds))
+	for i, bind := range binds {
+		fmt.Printf("DEBUG: Volume binding %d: %s\n", i+1, bind)
+	}
+
 	resp, err := c.cli.ContainerCreate(
 		c.ctx,
 		&container.Config{
@@ -410,6 +426,19 @@ func (c *Container) createContainer() error {
 	// Start the container
 	if err := c.cli.ContainerStart(c.ctx, c.ContainerID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("error starting container: %w", err)
+	}
+
+	// Add inspection to verify mounts
+	containerInfo, err := c.cli.ContainerInspect(c.ctx, c.ContainerID)
+	if err != nil {
+		fmt.Printf("Warning: Could not inspect container after creation: %v\n", err)
+	} else {
+		fmt.Printf("DEBUG: Container %s created and started successfully\n", c.ContainerID)
+		fmt.Printf("DEBUG: Container has %d mounts configured\n", len(containerInfo.Mounts))
+		for i, mount := range containerInfo.Mounts {
+			fmt.Printf("DEBUG: Mount %d: Host=%s Container=%s Type=%s\n",
+				i+1, mount.Source, mount.Destination, mount.Type)
+		}
 	}
 
 	return nil

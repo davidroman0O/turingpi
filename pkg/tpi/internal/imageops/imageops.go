@@ -51,9 +51,14 @@ type PrepareImageOptions struct {
 }
 
 // InitDockerConfig initializes the Docker configuration for cross-platform operations
-func InitDockerConfig(sourceDir, tempDir, outputDir string) {
+func InitDockerConfig(sourceDir, tempDir, outputDir string) error {
 	// We'll use the Docker adapter to manage Docker resources
 	var err error
+
+	fmt.Printf("InitDockerConfig called with:\n")
+	fmt.Printf("  sourceDir: %s\n", sourceDir)
+	fmt.Printf("  tempDir: %s\n", tempDir)
+	fmt.Printf("  outputDir: %s\n", outputDir)
 
 	// Create a temporary config first to set the image name
 	config := platform.NewDefaultDockerConfig(sourceDir, tempDir, outputDir)
@@ -61,16 +66,49 @@ func InitDockerConfig(sourceDir, tempDir, outputDir string) {
 	// Set the image to turingpi-prepare which triggers special handling
 	config.DockerImage = "turingpi-prepare"
 
-	// Create the adapter with our custom config
-	dockerAdapter, err = docker.NewAdapterWithConfig(config)
+	fmt.Printf("Docker configuration prepared:\n")
+	fmt.Printf("  Image: %s\n", config.DockerImage)
+	fmt.Printf("  Container Name: %s\n", config.ContainerName)
+	fmt.Printf("  Source Dir: %s\n", config.SourceDir)
+	fmt.Printf("  Temp Dir: %s\n", config.TempDir)
+	fmt.Printf("  Output Dir: %s\n", config.OutputDir)
+	fmt.Printf("  Additional Mounts: %d\n", len(config.AdditionalMounts))
+
+	// Create the adapter with our custom config - with retries
+	maxRetries := 3
+	for retry := 0; retry < maxRetries; retry++ {
+		fmt.Printf("Attempting to create Docker adapter (attempt %d/%d)...\n", retry+1, maxRetries)
+		dockerAdapter, err = docker.NewAdapterWithConfig(config)
+		if err == nil {
+			break
+		}
+
+		if retry < maxRetries-1 {
+			waitTime := time.Duration(retry+1) * time.Second
+			fmt.Printf("Docker connection attempt %d failed: %v. Retrying in %v...\n",
+				retry+1, err, waitTime)
+			time.Sleep(waitTime)
+		}
+	}
+
 	if err != nil {
-		fmt.Printf("Warning: Failed to initialize Docker container: %v\n", err)
-		return
+		// Clear any partially initialized adapter
+		dockerAdapter = nil
+		DockerConfig = nil
+		DockerContainerID = ""
+		return fmt.Errorf("critical error: failed to initialize Docker after %d attempts: %w",
+			maxRetries, err)
 	}
 
 	// Keep the DockerConfig for backward compatibility
 	DockerConfig = dockerAdapter.Container.Config
 	DockerContainerID = dockerAdapter.GetContainerID()
+
+	fmt.Printf("Docker adapter initialized successfully.\n")
+	fmt.Printf("  Container ID: %s\n", DockerContainerID)
+	fmt.Printf("  Container Name: %s\n", dockerAdapter.GetContainerName())
+
+	return nil
 }
 
 // PrepareImage decompresses a disk image, modifies it with network settings, and recompresses it
@@ -151,7 +189,12 @@ func PrepareImage(opts PrepareImageOptions) (string, error) {
 	ipCIDR := opts.IPAddress + opts.IPCIDRSuffix
 
 	// Check if we need to use Docker for platform-independence
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() {
+		// Docker is required for non-Linux platforms, ensure it's properly initialized
+		if DockerConfig == nil || dockerAdapter == nil {
+			return "", fmt.Errorf("critical error: Docker configuration is not initialized, but required for non-Linux platforms")
+		}
+
 		fmt.Println("Using Docker for image modification (step by step)...")
 
 		// 2. Map partitions in Docker
@@ -250,10 +293,14 @@ func PrepareImage(opts PrepareImageOptions) (string, error) {
 		return "", fmt.Errorf("failed to recompress modified image: %w", err)
 	}
 
-	// Clean up Docker container if we used one
-	if !platform.IsLinux() && dockerAdapter != nil {
-		dockerAdapter.Cleanup()
-	}
+	// NOTE: We're no longer cleaning up the Docker container here
+	// to allow for subsequent operations. The caller should handle cleanup
+	// when all operations are complete.
+	//
+	// Previously:
+	// if !platform.IsLinux() && dockerAdapter != nil {
+	//    dockerAdapter.Cleanup()
+	// }
 
 	fmt.Printf("Successfully prepared image: %s\n", finalXZPath)
 	return finalXZPath, nil
@@ -271,70 +318,57 @@ func runCommand(cmd *exec.Cmd) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// DecompressImageXZ decompresses an XZ-compressed disk image
-func DecompressImageXZ(sourceImgXZAbs, tmpDir string) (string, error) {
-	// Create output filename by replacing .xz extension
-	outputImgPath := filepath.Join(tmpDir, filepath.Base(strings.TrimSuffix(sourceImgXZAbs, ".xz")))
-
-	// Check if we need to use Docker for platform-independence
-	if !platform.IsLinux() && dockerAdapter != nil {
-		fmt.Println("Using Docker for decompression...")
-		// Execute in the persistent container
-		// Note: In the turingpi-prepare Docker container:
-		// - Source directory is mounted at /images
-		// - Temp directory is mounted at /tmp
-		// - Output directory is mounted at /prepared-images
-		dockerCmd := fmt.Sprintf("xz -dc %s > %s",
-			filepath.Join("/images", filepath.Base(sourceImgXZAbs)),
-			filepath.Join("/tmp", filepath.Base(outputImgPath)))
-
-		_, err := dockerAdapter.ExecuteCommand(dockerCmd)
-		if err != nil {
-			return "", fmt.Errorf("Docker decompression failed: %w", err)
-		}
-
-		fmt.Printf("Decompression successful: %s\n", outputImgPath)
-		return outputImgPath, nil
-	}
-
-	// Native Linux approach
-	cmd := exec.Command("xz", "--decompress", "--keep", "--stdout", sourceImgXZAbs)
-	outFile, err := os.Create(outputImgPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer outFile.Close()
-
-	cmd.Stdout = outFile
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	fmt.Printf("Decompressing: %s -> %s\n", sourceImgXZAbs, outputImgPath)
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("decompression failed: %w - %s", err, stderr.String())
-	}
-
-	// Verify the file was created
-	if _, err := os.Stat(outputImgPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("decompressed image not found at %s", outputImgPath)
-	}
-
-	return outputImgPath, nil
-}
-
 // MapPartitions uses kpartx to map disk partitions
 func MapPartitions(imgPathAbs string) (string, error) {
 	// For non-Linux platforms, use Docker
-	if !platform.IsLinux() && dockerAdapter != nil {
+	if !platform.IsLinux() {
+		if dockerAdapter == nil {
+			return "", fmt.Errorf("critical error: Docker adapter is not initialized, but required for partition mapping on non-Linux platforms")
+		}
+
 		fmt.Println("Using Docker for partition mapping...")
 
-		// Execute kpartx in Docker - just run kpartx and get its output
-		dockerCmd := fmt.Sprintf("kpartx -av /tmp/%s", filepath.Base(imgPathAbs))
+		// Check if the image file exists in the container
+		// First, copy the image to the Docker container if it's not already there
+		fmt.Printf("DEBUG: Checking image path: %s\n", imgPathAbs)
+
+		// The image should be in the /tmp directory inside the container
+		// Get the basename of the image file
+		imgBaseName := filepath.Base(imgPathAbs)
+		containerImgPath := fmt.Sprintf("/tmp/%s", imgBaseName)
+
+		// Check if the image exists inside the container
+		checkCmd := fmt.Sprintf("ls -la %s", containerImgPath)
+		checkOutput, err := dockerAdapter.ExecuteCommand(checkCmd)
+		if err != nil {
+			fmt.Printf("DEBUG: Image not found in container at %s\n", containerImgPath)
+			fmt.Printf("DEBUG: Will copy image to container\n")
+
+			// Copy image to container
+			copyCmd := exec.Command("docker", "cp",
+				imgPathAbs,
+				fmt.Sprintf("%s:%s", dockerAdapter.GetContainerName(), containerImgPath))
+
+			copyOutput, err := copyCmd.CombinedOutput()
+			if err != nil {
+				return "", fmt.Errorf("failed to copy image to container: %w, output: %s", err, string(copyOutput))
+			}
+
+			fmt.Printf("DEBUG: Copied image to container: %s -> %s\n", imgPathAbs, containerImgPath)
+		} else {
+			fmt.Printf("DEBUG: Image already exists in container: %s\n", checkOutput)
+		}
+
+		// Execute kpartx in Docker
+		dockerCmd := fmt.Sprintf("kpartx -av %s", containerImgPath)
+		fmt.Printf("DEBUG: Running in container: %s\n", dockerCmd)
 
 		output, err := dockerAdapter.ExecuteCommand(dockerCmd)
 		if err != nil {
 			return "", fmt.Errorf("Docker partition mapping failed: %w", err)
 		}
+
+		fmt.Printf("DEBUG: kpartx output: %s\n", output)
 
 		// Parse output using the same helper as native Linux approach for consistency
 		rootDevice, err := parseKpartxOutput(output)
@@ -345,7 +379,14 @@ func MapPartitions(imgPathAbs string) (string, error) {
 		rootDevPath := fmt.Sprintf("/dev/mapper/%s", rootDevice)
 		fmt.Printf("Docker mapped root partition: %s\n", rootDevPath)
 
-		// No need to wait for device in Docker - it should be immediately available in the container
+		// Check if the device was actually created
+		checkDevCmd := fmt.Sprintf("ls -la %s", rootDevPath)
+		checkDevOutput, err := dockerAdapter.ExecuteCommand(checkDevCmd)
+		if err != nil {
+			return "", fmt.Errorf("mapped device not found in container: %s", rootDevPath)
+		}
+		fmt.Printf("DEBUG: Device exists: %s\n", checkDevOutput)
+
 		return rootDevPath, nil
 	}
 
@@ -443,13 +484,34 @@ func MountFilesystem(partitionDevice, mountDir string) error {
 		// Extract the partition name from the full path
 		partName := filepath.Base(partitionDevice)
 
-		// Execute mount in Docker
-		dockerCmd := fmt.Sprintf("mkdir -p /mnt && mount /dev/mapper/%s /mnt", partName)
-
-		_, err := dockerAdapter.ExecuteCommand(dockerCmd)
+		// Make sure the mount directory exists in the container
+		prepareCmd := "mkdir -p /mnt"
+		_, err := dockerAdapter.ExecuteCommand(prepareCmd)
 		if err != nil {
-			return fmt.Errorf("Docker filesystem mounting failed: %w", err)
+			return fmt.Errorf("Docker failed to create mount directory: %w", err)
 		}
+
+		// Check if /dev/mapper exists and has the device
+		checkMapperCmd := "ls -la /dev/mapper/"
+		mapperOutput, err := dockerAdapter.ExecuteCommand(checkMapperCmd)
+		fmt.Printf("DEBUG: Mapper directory contents: \n%s\n", mapperOutput)
+
+		// Execute mount in Docker - use the full path to the device
+		dockerCmd := fmt.Sprintf("mount %s /mnt", partitionDevice)
+		fmt.Printf("DEBUG: Running in container: %s\n", dockerCmd)
+
+		output, err := dockerAdapter.ExecuteCommand(dockerCmd)
+		if err != nil {
+			return fmt.Errorf("Docker filesystem mounting failed: %w\nOutput: %s", err, output)
+		}
+
+		// Verify the mount worked
+		verifyCmd := "mount | grep /mnt"
+		verifyOutput, err := dockerAdapter.ExecuteCommand(verifyCmd)
+		if err != nil {
+			return fmt.Errorf("mount verification failed: %w", err)
+		}
+		fmt.Printf("DEBUG: Mount verification: %s\n", verifyOutput)
 
 		fmt.Printf("Docker mounted %s to /mnt\n", partName)
 		return nil
@@ -903,21 +965,8 @@ func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
 	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for file operations...")
 
-		// For Docker, we execute each operation individually with its own command
-		// First make sure the image is mounted
-		mountCmd := "mkdir -p /mnt && " +
-			"IMG_PATH=/tmp/" + filepath.Base(params.MountDir) + "/../img && " +
-			"KPARTX_OUTPUT=$(kpartx -av $IMG_PATH) && " +
-			"ROOT_PART_NAME=$(echo \"$KPARTX_OUTPUT\" | awk 'NR==2 {print $3}') && " +
-			"ROOT_PART=/dev/mapper/$ROOT_PART_NAME && " +
-			"mount $ROOT_PART /mnt"
-
-		_, err := dockerAdapter.ExecuteCommand(mountCmd)
-		if err != nil {
-			return fmt.Errorf("Docker initial mount failed: %w", err)
-		}
-
-		// Execute each operation individually
+		// Just execute each operation directly since the filesystem is already mounted at /mnt
+		// No need to mount again - we can reuse the existing mount
 		for i, op := range params.Operations {
 			fmt.Printf("Operation %d/%d: %s\n", i+1, len(params.Operations), op.Type())
 
@@ -1003,23 +1052,16 @@ func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
 			}
 
 			// Execute the operation in Docker
-			_, err = dockerAdapter.ExecuteCommand(dockerCmd)
+			output, err := dockerAdapter.ExecuteCommand(dockerCmd)
 			if err != nil {
-				// Ensure cleanup before returning error
-				cleanupCmd := "umount /mnt && kpartx -d $IMG_PATH"
-				_, _ = dockerAdapter.ExecuteCommand(cleanupCmd)
-				return fmt.Errorf("Docker operation %d (%s) failed: %w", i+1, op.Type(), err)
+				return fmt.Errorf("Docker operation %d (%s) failed: %w\nOutput: %s", i+1, op.Type(), err, output)
 			}
+
+			fmt.Printf("Operation completed successfully: %s\n", output)
 		}
 
-		// Clean up - unmount and remove partition mapping
-		cleanupCmd := "umount /mnt && kpartx -d $IMG_PATH"
-		_, err = dockerAdapter.ExecuteCommand(cleanupCmd)
-		if err != nil {
-			return fmt.Errorf("Docker cleanup failed: %w", err)
-		}
+		// No need to unmount or cleanup - caller will handle that
 
-		fmt.Println("Docker file operations completed successfully")
 		return nil
 	}
 
@@ -1098,4 +1140,399 @@ func ChmodInImage(mountDir, relativePath string, perm os.FileMode) error {
 	}
 
 	return nil
+}
+
+// DecompressImageXZ decompresses an XZ-compressed disk image
+func DecompressImageXZ(sourceImgXZAbs, tmpDir string) (string, error) {
+	// Create output filename by replacing .xz extension
+	outputImgPath := filepath.Join(tmpDir, filepath.Base(strings.TrimSuffix(sourceImgXZAbs, ".xz")))
+
+	// Check if we need to use Docker for platform-independence
+	if !platform.IsLinux() {
+		if dockerAdapter == nil {
+			return "", fmt.Errorf("critical error: Docker adapter is not initialized, but required for image decompression on non-Linux platforms")
+		}
+
+		fmt.Println("Using Docker for decompression...")
+
+		// Add a lot more debug information
+		fmt.Printf("DEBUG: Source file absolute path: %s\n", sourceImgXZAbs)
+		fmt.Printf("DEBUG: Source file directory: %s\n", filepath.Dir(sourceImgXZAbs))
+		fmt.Printf("DEBUG: Source file base name: %s\n", filepath.Base(sourceImgXZAbs))
+		fmt.Printf("DEBUG: Output file path: %s\n", outputImgPath)
+		fmt.Printf("DEBUG: Output file base name: %s\n", filepath.Base(outputImgPath))
+		fmt.Printf("DEBUG: Container ID: %s\n", dockerAdapter.GetContainerID())
+		fmt.Printf("DEBUG: Container Name: %s\n", dockerAdapter.GetContainerName())
+		fmt.Printf("DEBUG: Docker Config Source Dir: %s\n", dockerAdapter.Container.Config.SourceDir)
+		fmt.Printf("DEBUG: Docker Config Temp Dir: %s\n", dockerAdapter.Container.Config.TempDir)
+		fmt.Printf("DEBUG: Docker Config Output Dir: %s\n", dockerAdapter.Container.Config.OutputDir)
+
+		// Check disk space in Docker
+		diskSpaceOutput, err := dockerAdapter.ExecuteCommand("df -h")
+		fmt.Printf("DEBUG: Docker disk space:\n%s\n", diskSpaceOutput)
+
+		// First ensure that the /workspace directory exists and is writable in the container
+		prepareCmd := "mkdir -p /workspace && chmod 777 /workspace && ls -la / | grep workspace"
+		workspaceOutput, err := dockerAdapter.ExecuteCommand(prepareCmd)
+		if err != nil {
+			return "", fmt.Errorf("Failed to prepare /workspace directory: %w", err)
+		}
+		fmt.Printf("DEBUG: Workspace directory: %s\n", workspaceOutput)
+
+		// Due to the disk space constraints, let's try to decompress directly on the host
+		// rather than in the Docker container
+		fmt.Printf("DEBUG: Attempting host-based decompression due to disk space concerns\n")
+
+		// First, copy the compressed file to the host temporary directory if it's not already there
+		hostSourcePath := sourceImgXZAbs
+		if !strings.HasPrefix(sourceImgXZAbs, tmpDir) {
+			hostTempSourcePath := filepath.Join(tmpDir, filepath.Base(sourceImgXZAbs))
+			if _, err := os.Stat(hostTempSourcePath); os.IsNotExist(err) {
+				fmt.Printf("DEBUG: Copying source file to temporary directory: %s -> %s\n", sourceImgXZAbs, hostTempSourcePath)
+				data, err := os.ReadFile(sourceImgXZAbs)
+				if err != nil {
+					return "", fmt.Errorf("Failed to read source file: %w", err)
+				}
+
+				err = os.WriteFile(hostTempSourcePath, data, 0644)
+				if err != nil {
+					return "", fmt.Errorf("Failed to write source file to temp dir: %w", err)
+				}
+			}
+			hostSourcePath = hostTempSourcePath
+		}
+
+		// Try decompression on the host
+		fmt.Printf("DEBUG: Attempting decompression on host: %s -> %s\n", hostSourcePath, outputImgPath)
+
+		// Create command to decompress on host
+		hostCmd := exec.Command("xz", "--decompress", "--keep", "--stdout", hostSourcePath)
+		outFile, err := os.Create(outputImgPath)
+		if err != nil {
+			return "", fmt.Errorf("Failed to create output file: %w", err)
+		}
+		defer outFile.Close()
+
+		hostCmd.Stdout = outFile
+		var stderr bytes.Buffer
+		hostCmd.Stderr = &stderr
+
+		err = hostCmd.Run()
+		if err != nil {
+			fmt.Printf("DEBUG: Host decompression failed: %v - %s\n", err, stderr.String())
+			fmt.Printf("DEBUG: Falling back to Docker-based decompression\n")
+
+			// Since we're in a disk space constrained environment,
+			// Try to decompress and process in smaller chunks directly to save space
+			fallingBackCmd := fmt.Sprintf("echo 'Using space-efficient approach' && xz --decompress --keep --stdout %s > %s && ls -lah %s",
+				filepath.Join("/tmp", filepath.Base(sourceImgXZAbs)),
+				outputImgPath,
+				outputImgPath)
+
+			output, err := dockerAdapter.ExecuteCommand(fallingBackCmd)
+			if err != nil {
+				fmt.Printf("DEBUG: Docker decompression failed too: %s\n", output)
+				return "", fmt.Errorf("Both host and Docker decompression failed: %w", err)
+			}
+
+			fmt.Printf("DEBUG: Docker decompression output: %s\n", output)
+
+			// Check if the file was created in the container
+			checkCmd := fmt.Sprintf("ls -la %s", outputImgPath)
+			checkOutput, err := dockerAdapter.ExecuteCommand(checkCmd)
+			if err != nil {
+				fmt.Printf("DEBUG: File does not exist in container: %s\n", checkOutput)
+				return "", fmt.Errorf("Decompressed file not found in container")
+			}
+
+			fmt.Printf("DEBUG: File exists in container: %s\n", checkOutput)
+
+			// Success - the file is decompressed in the container
+			// We need to keep it there rather than copy it back to conserve disk space
+			// Return a special path indicating this file is in the container
+			return "DOCKER:" + outputImgPath, nil
+		}
+
+		// Host decompression succeeded
+		fmt.Printf("DEBUG: Host decompression succeeded\n")
+
+		// Verify the file was created
+		if _, err := os.Stat(outputImgPath); os.IsNotExist(err) {
+			return "", fmt.Errorf("Decompressed image not found at %s after host decompression", outputImgPath)
+		}
+
+		fmt.Printf("Decompression successful: %s\n", outputImgPath)
+		return outputImgPath, nil
+	}
+
+	// Native Linux approach
+	cmd := exec.Command("xz", "--decompress", "--keep", "--stdout", sourceImgXZAbs)
+	outFile, err := os.Create(outputImgPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outFile.Close()
+
+	cmd.Stdout = outFile
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	fmt.Printf("Decompressing: %s -> %s\n", sourceImgXZAbs, outputImgPath)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("decompression failed: %w - %s", err, stderr.String())
+	}
+
+	// Verify the file was created
+	if _, err := os.Stat(outputImgPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("decompressed image not found at %s", outputImgPath)
+	}
+
+	return outputImgPath, nil
+}
+
+// PrepareImageSimple is a simplified version that follows the prep.go approach
+// It decompresses, modifies and recompresses the image using Docker only where needed
+func PrepareImageSimple(opts PrepareImageOptions) (string, error) {
+	// Validate inputs
+	if opts.SourceImgXZ == "" {
+		return "", fmt.Errorf("source image path is required")
+	}
+	if opts.IPAddress == "" {
+		return "", fmt.Errorf("IP address is required")
+	}
+	if opts.Gateway == "" {
+		return "", fmt.Errorf("gateway is required")
+	}
+	if len(opts.DNSServers) == 0 {
+		return "", fmt.Errorf("at least one DNS server is required")
+	}
+
+	// Set default CIDR suffix if not provided
+	if opts.IPCIDRSuffix == "" {
+		opts.IPCIDRSuffix = "/24"
+	}
+
+	// Set default hostname if not provided
+	if opts.Hostname == "" {
+		opts.Hostname = fmt.Sprintf("node%d", opts.NodeNum)
+	}
+
+	// Set default output directory if not provided
+	if opts.OutputDir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		opts.OutputDir = filepath.Join(homeDir, ".cache", "turingpi", "images")
+	}
+
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(opts.OutputDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Set default temp directory if not provided
+	if opts.TempDir == "" {
+		opts.TempDir = os.TempDir()
+	}
+
+	// Output filename based on hostname
+	outputFilename := fmt.Sprintf("%s.img.xz", opts.Hostname)
+	outputPath := filepath.Join(opts.OutputDir, outputFilename)
+
+	// If output file already exists, return it (caching)
+	if _, err := os.Stat(outputPath); err == nil {
+		fmt.Printf("Image already exists: %s\n", outputPath)
+		return outputPath, nil
+	}
+
+	// Create a temp working directory
+	tempWorkDir, err := os.MkdirTemp(opts.TempDir, "turingpi-image-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempWorkDir) // Clean up at the end
+
+	// Path to the uncompressed image
+	sourceImgXZAbs, err := filepath.Abs(opts.SourceImgXZ)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path: %w", err)
+	}
+	imgPath := filepath.Join(tempWorkDir, filepath.Base(strings.TrimSuffix(sourceImgXZAbs, ".xz")))
+
+	// Calculate full CIDR address
+	ipCIDR := opts.IPAddress + opts.IPCIDRSuffix
+
+	// Check if we're running on Linux
+	if platform.IsLinux() {
+		// --- Native Linux approach ---
+		fmt.Println("Running on Linux, using native tools")
+
+		// 1. Decompress image
+		fmt.Println("Decompressing image...")
+		cmd := exec.Command("xz", "--decompress", "--keep", "--stdout", sourceImgXZAbs)
+		outFile, err := os.Create(imgPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to create output file: %w", err)
+		}
+
+		cmd.Stdout = outFile
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			outFile.Close()
+			return "", fmt.Errorf("decompression failed: %w - %s", err, stderr.String())
+		}
+		outFile.Close()
+		fmt.Printf("Decompressed to: %s\n", imgPath)
+
+		// 2. Map partitions
+		fmt.Println("Mapping partitions...")
+		rootPartition, err := MapPartitions(imgPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to map partitions: %w", err)
+		}
+		defer CleanupPartitions(imgPath) // Ensure cleanup
+
+		// 3. Mount filesystem
+		mountDir := filepath.Join(tempWorkDir, "mnt")
+		if err := os.MkdirAll(mountDir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create mount dir: %w", err)
+		}
+
+		if err := MountFilesystem(rootPartition, mountDir); err != nil {
+			return "", fmt.Errorf("failed to mount filesystem: %w", err)
+		}
+		defer UnmountFilesystem(mountDir) // Ensure unmount
+
+		// 4. Apply network configuration
+		fmt.Println("Applying network configuration...")
+		if err := ApplyNetworkConfig(mountDir, opts.Hostname, ipCIDR, opts.Gateway, opts.DNSServers); err != nil {
+			return "", fmt.Errorf("failed to apply network config: %w", err)
+		}
+
+		// 5. Recompress
+		fmt.Println("Recompressing image...")
+		if err := RecompressImageXZ(imgPath, outputPath); err != nil {
+			return "", fmt.Errorf("failed to recompress image: %w", err)
+		}
+
+	} else {
+		// --- Docker approach ---
+		if dockerAdapter == nil {
+			return "", fmt.Errorf("Docker adapter not initialized but required for non-Linux platforms")
+		}
+
+		fmt.Println("Running on non-Linux platform, using Docker")
+
+		// Create a simple shell script to perform the operations
+		scriptPath := filepath.Join(tempWorkDir, "prepare_image.sh")
+
+		// Format DNS servers for the script
+		dnsServerList := strings.Join(opts.DNSServers, ",")
+
+		// Create the shell script content
+		scriptContent := fmt.Sprintf(`#!/bin/bash
+set -e
+
+SOURCE_XZ=/images/%s
+DEST_IMG=/workspace/image.img
+MOUNT_DIR=/workspace/mnt
+OUTPUT_XZ=/prepared-images/%s
+
+# 1. Decompress image
+echo "==> Decompressing image..."
+xz -dc $SOURCE_XZ > $DEST_IMG
+
+# 2. Map partitions
+echo "==> Mapping partitions..."
+KPARTX_OUTPUT=$(kpartx -av $DEST_IMG)
+echo "$KPARTX_OUTPUT"
+ROOT_PART_NAME=$(echo "$KPARTX_OUTPUT" | awk 'NR==2 {print $3}')
+ROOT_PART=/dev/mapper/$ROOT_PART_NAME
+
+# 3. Mount filesystem
+echo "==> Mounting filesystem..."
+mkdir -p $MOUNT_DIR
+mount $ROOT_PART $MOUNT_DIR
+
+# 4. Apply network configuration
+echo "==> Configuring system..."
+# 4.1 Set hostname
+echo "%s" > $MOUNT_DIR/etc/hostname
+
+# 4.2 Apply netplan config
+mkdir -p $MOUNT_DIR/etc/netplan
+cat > $MOUNT_DIR/etc/netplan/01-turing-static.yaml << EOF
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: no
+      addresses:
+        - %s
+      gateway4: %s
+      nameservers:
+        addresses: [%s]
+EOF
+
+# 5. Unmount and cleanup
+echo "==> Cleaning up..."
+umount $MOUNT_DIR
+kpartx -d $DEST_IMG
+
+# 6. Recompress
+echo "==> Recompressing image..."
+xz -zc $DEST_IMG > $OUTPUT_XZ
+
+echo "==> Image preparation complete!"
+`,
+			filepath.Base(sourceImgXZAbs),
+			filepath.Base(outputPath),
+			opts.Hostname,
+			ipCIDR,
+			opts.Gateway,
+			dnsServerList)
+
+		// Write the script to the temp directory
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			return "", fmt.Errorf("failed to create preparation script: %w", err)
+		}
+
+		// Copy the script to the container
+		scriptName := filepath.Base(scriptPath)
+		containerScriptPath := filepath.Join("/workspace", scriptName)
+
+		copyCmd := exec.Command("docker", "cp", scriptPath,
+			fmt.Sprintf("%s:%s", dockerAdapter.GetContainerName(), containerScriptPath))
+		if output, err := copyCmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("failed to copy script to container: %w, output: %s", err, string(output))
+		}
+
+		// Execute the script in the container
+		fmt.Println("Executing image preparation script in Docker...")
+		scriptCmd := fmt.Sprintf("bash %s", containerScriptPath)
+		_, err = dockerAdapter.ExecuteCommand(scriptCmd)
+		if err != nil {
+			return "", fmt.Errorf("failed to execute preparation script in Docker: %w", err)
+		}
+
+		// The output file should now be in the prepared-images directory
+		fmt.Printf("Docker preparation completed successfully. Output: %s\n", outputPath)
+	}
+
+	// Final verification
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("output file not found at %s after preparation", outputPath)
+	}
+
+	fmt.Printf("Image preparation completed successfully: %s\n", outputPath)
+	return outputPath, nil
+}
+
+// DockerAdapter returns the current Docker adapter instance
+// Can be used for cleanup after all operations are complete
+func DockerAdapter() *docker.DockerAdapter {
+	return dockerAdapter
 }
