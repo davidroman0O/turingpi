@@ -10,7 +10,7 @@ import (
 
 	"github.com/davidroman0O/turingpi/pkg/tpi"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
-	"github.com/davidroman0O/turingpi/pkg/tpi/ubuntu" // Import the Ubuntu-specific builders
+	"github.com/davidroman0O/turingpi/pkg/tpi/ubuntu"
 )
 
 func main() {
@@ -65,7 +65,6 @@ func main() {
 		}
 
 		// --- Phase 1: Image Build ---
-		// Use the EXACT paths from the documentation
 		sourceImageDir := "/Users/davidroman/Documents/iso/turingpi"
 		sourceImageName := "ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img.xz"
 		baseImagePath := filepath.Join(sourceImageDir, sourceImageName)
@@ -138,7 +137,6 @@ func main() {
 		log.Println("Executing Phase 2: OS Installation...")
 
 		// Generate a generic config with SSH keys (or hardcode a public key)
-		// In a real application, you would use your own SSH keys or generate them
 		sshPublicKey := "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCxuZZ1rJJMxuZ0HYW/FZFvd1Y4PT1CUdZmY/1jizwEXxIJ9lpI3laA5hxopV4dUYEQhkj7AcjHLcZCBOKhV0WcqGsJXpqHpiWlk1YEWxwQHPx46gejHi2VL/UBusMw+YMGH/P3p+s8h5LbgFwkIzYxzRbVJNJYv1gOxnQPV7+XnHU5FO+dRN1M4sMt5gGAq0OlU6f1a1+z2zCdHGwXDKVOqWGzGME6v2FVuK32N5c+8XY0kZdXxL8VxmXvFbZIa1wRcYAaohwGhnC4+GrZhJFp9hgzH8nPDLpKAizO9yw7cjZ4KjfRlZanGNQ7GTnQkwGH0D6zLGe0B0L6Q3KAxTmJ turing@example.com"
 
 		genericConfig := tpi.OSInstallConfig{
