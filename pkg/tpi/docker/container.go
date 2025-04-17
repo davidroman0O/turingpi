@@ -87,6 +87,10 @@ func New(config *platform.DockerExecutionConfig) (*Container, error) {
 		return nil, err
 	}
 
+	// Register container with the global registry
+	registry := GetRegistry()
+	registry.RegisterContainer(c.ContainerID)
+
 	return c, nil
 }
 
@@ -547,6 +551,9 @@ func (c *Container) Cleanup() error {
 		return nil
 	}
 
+	// Store containerID for registry cleanup even if removed during cleanup
+	containerID := c.ContainerID
+
 	fmt.Printf("Cleaning up container %s (Name: %s)...\n", c.ContainerID, c.Config.ContainerName)
 
 	// Create a context with timeout for cleanup operations
@@ -558,6 +565,8 @@ func (c *Container) Cleanup() error {
 	if err != nil {
 		if client.IsErrNotFound(err) {
 			fmt.Printf("Container %s no longer exists, nothing to clean up\n", c.ContainerID)
+			// Unregister from registry even though it doesn't exist
+			GetRegistry().UnregisterContainer(containerID)
 			return nil
 		}
 		// For other errors, we still try to remove the container
@@ -577,10 +586,14 @@ func (c *Container) Cleanup() error {
 	// Remove container with force option to ensure it's removed even if running
 	removeErr := c.cli.ContainerRemove(ctx, c.ContainerID, container.RemoveOptions{Force: true})
 	if removeErr != nil {
+		// Unregister from registry even if error, as we can't do more
+		GetRegistry().UnregisterContainer(containerID)
 		return fmt.Errorf("error removing container: %w", removeErr)
 	}
 
 	fmt.Printf("Container %s (Name: %s) successfully removed\n", c.ContainerID, c.Config.ContainerName)
+	// Unregister from registry after successful cleanup
+	GetRegistry().UnregisterContainer(containerID)
 	return nil
 }
 
