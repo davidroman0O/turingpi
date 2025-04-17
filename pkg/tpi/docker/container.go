@@ -95,9 +95,10 @@ func (c *Container) ensureTuringPiPrepareImage() error {
 	defer os.RemoveAll(tempDir) // Clean up when done
 
 	// Define the Dockerfile content
+	// Note: replaced virtual packages with their concrete implementations
 	dockerfileContent := `FROM ubuntu:22.04
 
-# Install necessary tools
+# Install necessary tools - using specific package names instead of virtual packages
 RUN apt-get update && apt-get install -y \
     kpartx \
     xz-utils \
@@ -106,9 +107,9 @@ RUN apt-get update && apt-get install -y \
     e2fsprogs \
     dosfstools \
     mount \
-    awk \
-    grep \
-    sed \
+    mawk \
+    coreutils \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
