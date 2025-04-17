@@ -24,11 +24,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/davidroman0O/turingpi/pkg/tpi/docker"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
 )
 
 // DockerConfig holds the Docker execution configuration used for platform-independent image operations
 var DockerConfig *platform.DockerExecutionConfig
+
+// DockerContainerID stores the ID of the persistent container we create for operations
+var DockerContainerID string
+
+// dockerAdapter for performing operations - will be initialized for non-Linux platforms
+var dockerAdapter *docker.DockerAdapter
 
 // PrepareImageOptions contains all parameters needed to prepare an image
 type PrepareImageOptions struct {
@@ -45,7 +52,25 @@ type PrepareImageOptions struct {
 
 // InitDockerConfig initializes the Docker configuration for cross-platform operations
 func InitDockerConfig(sourceDir, tempDir, outputDir string) {
-	DockerConfig = platform.NewDefaultDockerConfig(sourceDir, tempDir, outputDir)
+	// We'll use the Docker adapter to manage Docker resources
+	var err error
+
+	// Create a temporary config first to set the image name
+	config := platform.NewDefaultDockerConfig(sourceDir, tempDir, outputDir)
+
+	// Set the image to turingpi-prepare which triggers special handling
+	config.DockerImage = "turingpi-prepare"
+
+	// Create the adapter with our custom config
+	dockerAdapter, err = docker.NewAdapterWithConfig(config)
+	if err != nil {
+		fmt.Printf("Warning: Failed to initialize Docker container: %v\n", err)
+		return
+	}
+
+	// Keep the DockerConfig for backward compatibility
+	DockerConfig = dockerAdapter.Container.Config
+	DockerContainerID = dockerAdapter.GetContainerID()
 }
 
 // PrepareImage decompresses a disk image, modifies it with network settings, and recompresses it
@@ -225,6 +250,11 @@ func PrepareImage(opts PrepareImageOptions) (string, error) {
 		return "", fmt.Errorf("failed to recompress modified image: %w", err)
 	}
 
+	// Clean up Docker container if we used one
+	if !platform.IsLinux() && dockerAdapter != nil {
+		dockerAdapter.Cleanup()
+	}
+
 	fmt.Printf("Successfully prepared image: %s\n", finalXZPath)
 	return finalXZPath, nil
 }
@@ -247,14 +277,19 @@ func DecompressImageXZ(sourceImgXZAbs, tmpDir string) (string, error) {
 	outputImgPath := filepath.Join(tmpDir, filepath.Base(strings.TrimSuffix(sourceImgXZAbs, ".xz")))
 
 	// Check if we need to use Docker for platform-independence
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for decompression...")
-		// Docker command to decompress: xz -dc source.img.xz > output.img
+		// Execute in the persistent container
+		// Note: In the turingpi-prepare Docker container:
+		// - Source directory is mounted at /images
+		// - Temp directory is mounted at /tmp
+		// - Output directory is mounted at /prepared-images
 		dockerCmd := fmt.Sprintf("xz -dc %s > %s",
 			filepath.Join("/images", filepath.Base(sourceImgXZAbs)),
 			filepath.Join("/tmp", filepath.Base(outputImgPath)))
 
-		if err := platform.ExecuteLinuxCommand(DockerConfig, "/tmp", dockerCmd); err != nil {
+		_, err := dockerAdapter.ExecuteCommand(dockerCmd)
+		if err != nil {
 			return "", fmt.Errorf("Docker decompression failed: %w", err)
 		}
 
@@ -290,19 +325,19 @@ func DecompressImageXZ(sourceImgXZAbs, tmpDir string) (string, error) {
 // MapPartitions uses kpartx to map disk partitions
 func MapPartitions(imgPathAbs string) (string, error) {
 	// For non-Linux platforms, use Docker
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for partition mapping...")
 
 		// Execute kpartx in Docker - just run kpartx and get its output
 		dockerCmd := fmt.Sprintf("kpartx -av /tmp/%s", filepath.Base(imgPathAbs))
 
-		output, err := platform.ExecuteLinuxCommandWithOutput(DockerConfig, filepath.Dir(imgPathAbs), dockerCmd)
+		output, err := dockerAdapter.ExecuteCommand(dockerCmd)
 		if err != nil {
 			return "", fmt.Errorf("Docker partition mapping failed: %w", err)
 		}
 
 		// Parse output using the same helper as native Linux approach for consistency
-		rootDevice, err := parseKpartxOutput(string(output))
+		rootDevice, err := parseKpartxOutput(output)
 		if err != nil {
 			return "", fmt.Errorf("failed to parse Docker kpartx output: %w", err)
 		}
@@ -375,13 +410,14 @@ func waitForDevice(devicePath string, timeout time.Duration) error {
 // CleanupPartitions unmaps partitions
 func CleanupPartitions(imgPathAbs string) error {
 	// For non-Linux platforms, use Docker
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for partition cleanup...")
 
 		// Execute kpartx cleanup in Docker
 		dockerCmd := fmt.Sprintf("kpartx -d /tmp/%s", filepath.Base(imgPathAbs))
 
-		if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(imgPathAbs), dockerCmd); err != nil {
+		_, err := dockerAdapter.ExecuteCommand(dockerCmd)
+		if err != nil {
 			return fmt.Errorf("Docker partition cleanup failed: %w", err)
 		}
 
@@ -401,7 +437,7 @@ func CleanupPartitions(imgPathAbs string) error {
 // MountFilesystem mounts a filesystem
 func MountFilesystem(partitionDevice, mountDir string) error {
 	// For non-Linux platforms, use Docker
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for filesystem mounting...")
 
 		// Extract the partition name from the full path
@@ -410,7 +446,8 @@ func MountFilesystem(partitionDevice, mountDir string) error {
 		// Execute mount in Docker
 		dockerCmd := fmt.Sprintf("mkdir -p /mnt && mount /dev/mapper/%s /mnt", partName)
 
-		if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(mountDir), dockerCmd); err != nil {
+		_, err := dockerAdapter.ExecuteCommand(dockerCmd)
+		if err != nil {
 			return fmt.Errorf("Docker filesystem mounting failed: %w", err)
 		}
 
@@ -443,13 +480,14 @@ func isMounted(path string) bool {
 // UnmountFilesystem unmounts a filesystem
 func UnmountFilesystem(mountDir string) error {
 	// For non-Linux platforms, use Docker
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for filesystem unmounting...")
 
 		// Execute umount in Docker
 		dockerCmd := "umount /mnt"
 
-		if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(mountDir), dockerCmd); err != nil {
+		_, err := dockerAdapter.ExecuteCommand(dockerCmd)
+		if err != nil {
 			return fmt.Errorf("Docker filesystem unmounting failed: %w", err)
 		}
 
@@ -508,30 +546,32 @@ func writeToFileAsRoot(filePath string, content []byte, perm fs.FileMode) error 
 // ApplyNetworkConfig applies network config to the mounted filesystem
 func ApplyNetworkConfig(mountDir string, hostname string, ipCIDR string, gateway string, dnsServers []string) error {
 	// For non-Linux platforms, use Docker
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for network configuration...")
 
 		// Set hostname
 		hostnameCmd := fmt.Sprintf("echo '%s' > /mnt/etc/hostname", hostname)
-		if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(mountDir), hostnameCmd); err != nil {
+		_, err := dockerAdapter.ExecuteCommand(hostnameCmd)
+		if err != nil {
 			return fmt.Errorf("Docker hostname config failed: %w", err)
 		}
 
 		// Update /etc/hosts
 		hostsContent := fmt.Sprintf("127.0.0.1\tlocalhost\n127.0.1.1\t%s\n\n", hostname)
 		hostsCmd := fmt.Sprintf("echo '%s' > /mnt/etc/hosts", hostsContent)
-		if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(mountDir), hostsCmd); err != nil {
+		_, err = dockerAdapter.ExecuteCommand(hostsCmd)
+		if err != nil {
 			return fmt.Errorf("Docker hosts file config failed: %w", err)
 		}
 
 		// Check if image uses Netplan
 		checkNetplanCmd := "[ -d /mnt/etc/netplan ] && echo 'netplan' || echo 'interfaces'"
-		netplanCheckOutput, err := platform.ExecuteLinuxCommandWithOutput(DockerConfig, filepath.Dir(mountDir), checkNetplanCmd)
+		netplanCheckOutput, err := dockerAdapter.ExecuteCommand(checkNetplanCmd)
 		if err != nil {
 			return fmt.Errorf("Docker netplan check failed: %w", err)
 		}
 
-		usesNetplan := strings.TrimSpace(string(netplanCheckOutput)) == "netplan"
+		usesNetplan := strings.TrimSpace(netplanCheckOutput) == "netplan"
 
 		if usesNetplan {
 			// Apply netplan config
@@ -551,7 +591,8 @@ network:
 `, ipCIDR, gateway, dnsAddrs)
 
 			netplanCmd := fmt.Sprintf("mkdir -p /mnt/etc/netplan && echo '%s' > /mnt/etc/netplan/01-netcfg.yaml", netplanYaml)
-			if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(mountDir), netplanCmd); err != nil {
+			_, err = dockerAdapter.ExecuteCommand(netplanCmd)
+			if err != nil {
 				return fmt.Errorf("Docker netplan config failed: %w", err)
 			}
 		} else {
@@ -595,7 +636,8 @@ iface eth0 inet static
 `, ipAddr, netmask, gateway, dnsLine)
 
 			interfacesCmd := fmt.Sprintf("mkdir -p /mnt/etc/network && echo '%s' > /mnt/etc/network/interfaces", interfacesContent)
-			if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(mountDir), interfacesCmd); err != nil {
+			_, err = dockerAdapter.ExecuteCommand(interfacesCmd)
+			if err != nil {
 				return fmt.Errorf("Docker interfaces config failed: %w", err)
 			}
 		}
@@ -731,14 +773,19 @@ iface eth0 inet static
 // RecompressImageXZ compresses a disk image with XZ
 func RecompressImageXZ(modifiedImgPath, finalXZPath string) error {
 	// Check if we need to use Docker for platform-independence
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for image compression...")
 		// Docker command to compress: xz -zck6 input.img > output.img.xz
+		// Note: In the turingpi-prepare Docker container:
+		// - Source directory is mounted at /images
+		// - Temp directory is mounted at /tmp
+		// - Output directory is mounted at /prepared-images
 		dockerCmd := fmt.Sprintf("xz -zck6 %s > %s",
 			filepath.Join("/tmp", filepath.Base(modifiedImgPath)),
-			filepath.Join("/output", filepath.Base(finalXZPath)))
+			filepath.Join("/prepared-images", filepath.Base(finalXZPath)))
 
-		if err := platform.ExecuteLinuxCommand(DockerConfig, "/tmp", dockerCmd); err != nil {
+		_, err := dockerAdapter.ExecuteCommand(dockerCmd)
+		if err != nil {
 			return fmt.Errorf("Docker compression failed: %w", err)
 		}
 
@@ -853,7 +900,7 @@ func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
 	fmt.Printf("Executing %d file operations...\n", len(params.Operations))
 
 	// Check if we need to use Docker for platform-independence
-	if !platform.IsLinux() && DockerConfig != nil {
+	if !platform.IsLinux() && dockerAdapter != nil {
 		fmt.Println("Using Docker for file operations...")
 
 		// For Docker, we execute each operation individually with its own command
@@ -865,7 +912,8 @@ func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
 			"ROOT_PART=/dev/mapper/$ROOT_PART_NAME && " +
 			"mount $ROOT_PART /mnt"
 
-		if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(params.MountDir), mountCmd); err != nil {
+		_, err := dockerAdapter.ExecuteCommand(mountCmd)
+		if err != nil {
 			return fmt.Errorf("Docker initial mount failed: %w", err)
 		}
 
@@ -896,7 +944,7 @@ func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
 				tempFileName := filepath.Base(tempPath)
 				copyToDockerCmd := fmt.Sprintf("docker cp %s %s:/tmp/%s",
 					tempPath,
-					DockerConfig.ContainerName,
+					dockerAdapter.Container.Config.ContainerName,
 					tempFileName)
 
 				copyCmd := exec.Command("bash", "-c", copyToDockerCmd)
@@ -941,7 +989,7 @@ func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
 				tempFileName := filepath.Base(tempPath)
 				copyToDockerCmd := fmt.Sprintf("docker cp %s %s:/tmp/%s",
 					tempPath,
-					DockerConfig.ContainerName,
+					dockerAdapter.Container.Config.ContainerName,
 					tempFileName)
 
 				copyCmd := exec.Command("bash", "-c", copyToDockerCmd)
@@ -955,17 +1003,19 @@ func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
 			}
 
 			// Execute the operation in Docker
-			if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(params.MountDir), dockerCmd); err != nil {
+			_, err = dockerAdapter.ExecuteCommand(dockerCmd)
+			if err != nil {
 				// Ensure cleanup before returning error
 				cleanupCmd := "umount /mnt && kpartx -d $IMG_PATH"
-				_ = platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(params.MountDir), cleanupCmd)
+				_, _ = dockerAdapter.ExecuteCommand(cleanupCmd)
 				return fmt.Errorf("Docker operation %d (%s) failed: %w", i+1, op.Type(), err)
 			}
 		}
 
 		// Clean up - unmount and remove partition mapping
 		cleanupCmd := "umount /mnt && kpartx -d $IMG_PATH"
-		if err := platform.ExecuteLinuxCommand(DockerConfig, filepath.Dir(params.MountDir), cleanupCmd); err != nil {
+		_, err = dockerAdapter.ExecuteCommand(cleanupCmd)
+		if err != nil {
 			return fmt.Errorf("Docker cleanup failed: %w", err)
 		}
 

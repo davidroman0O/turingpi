@@ -175,35 +175,35 @@ func main() {
 			}
 
 			// Example 3: Install and configure some standard services
-			// Update package index
-			_, _, err = remote.RunCommand("sudo apt update", 30*time.Second)
-			if err != nil {
-				log.Printf("Warning: APT update failed: %v", err)
-				// Continue despite error
-			}
+			// // Update package index
+			// _, _, err = remote.RunCommand("sudo apt update", 30*time.Second)
+			// if err != nil {
+			// 	log.Printf("Warning: APT update failed: %v", err)
+			// 	// Continue despite error
+			// }
 
-			// Install common utilities that exist in standard Ubuntu
-			_, _, err = remote.RunCommand("sudo apt install -y openssh-server fail2ban htop iotop", 2*time.Minute)
-			if err != nil {
-				log.Printf("Warning: Package installation failed: %v", err)
-				// Continue despite error
-			} else {
-				log.Println("Common utilities installed successfully")
-			}
+			// // Install common utilities that exist in standard Ubuntu
+			// _, _, err = remote.RunCommand("sudo apt install -y openssh-server fail2ban htop iotop", 2*time.Minute)
+			// if err != nil {
+			// 	log.Printf("Warning: Package installation failed: %v", err)
+			// 	// Continue despite error
+			// } else {
+			// 	log.Println("Common utilities installed successfully")
+			// }
 
-			// Configure SSH server to be more secure
-			_, _, err = remote.RunCommand("sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config", 10*time.Second)
-			if err != nil {
-				log.Printf("Warning: SSH configuration failed: %v", err)
-				// Continue despite error
-			}
+			// // Configure SSH server to be more secure
+			// _, _, err = remote.RunCommand("sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config", 10*time.Second)
+			// if err != nil {
+			// 	log.Printf("Warning: SSH configuration failed: %v", err)
+			// 	// Continue despite error
+			// }
 
-			// Restart SSH service (standard service on Ubuntu)
-			_, _, err = remote.RunCommand("sudo systemctl restart ssh", 10*time.Second)
-			if err != nil {
-				log.Printf("Warning: SSH service restart failed: %v", err)
-				// Continue despite error
-			}
+			// // Restart SSH service (standard service on Ubuntu)
+			// _, _, err = remote.RunCommand("sudo systemctl restart ssh", 10*time.Second)
+			// if err != nil {
+			// 	log.Printf("Warning: SSH service restart failed: %v", err)
+			// 	// Continue despite error
+			// }
 
 			return nil
 		})
