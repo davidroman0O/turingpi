@@ -14,26 +14,16 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// SSHConfig holds parameters for connecting to the BMC
-// We might pass this around instead of relying on global vars in the future.
-type SSHConfig struct {
-	Host     string
-	User     string
-	Password string
-	Timeout  time.Duration
-}
-
+// getSSHClientConfig creates an SSH client configuration from the adapter's config.
 func getSSHClientConfig(cfg SSHConfig) (*ssh.ClientConfig, error) {
 	if cfg.User == "" {
 		return nil, fmt.Errorf("SSH user cannot be empty")
 	}
-	// Password can be empty if using other auth methods in the future
 
 	auth := []ssh.AuthMethod{}
 	if cfg.Password != "" {
 		auth = append(auth, ssh.Password(cfg.Password))
 	} else {
-		// Handle other auth methods if needed (e.g., key files)
 		return nil, fmt.Errorf("SSH password is required (key auth not implemented)")
 	}
 
@@ -45,20 +35,19 @@ func getSSHClientConfig(cfg SSHConfig) (*ssh.ClientConfig, error) {
 	return &ssh.ClientConfig{
 		User:            cfg.User,
 		Auth:            auth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Make this configurable?
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         timeout,
 	}, nil
 }
 
-// ExecuteCommand executes a command on the BMC via SSH.
-// It requires providing explicit connection details.
-func ExecuteCommand(cfg SSHConfig, command string) (stdout string, stderr string, err error) {
-	sshConfig, err := getSSHClientConfig(cfg)
+// ExecuteCommand implements BMCAdapter.ExecuteCommand.
+func (a *bmcAdapter) ExecuteCommand(command string) (stdout string, stderr string, err error) {
+	sshConfig, err := getSSHClientConfig(a.config)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid SSH config: %w", err)
 	}
 
-	addr := fmt.Sprintf("%s:22", cfg.Host)
+	addr := fmt.Sprintf("%s:22", a.config.Host)
 	log.Printf("[BMC SSH EXEC] Connecting to %s...", addr)
 	client, err := ssh.Dial("tcp", addr, sshConfig)
 	if err != nil {
@@ -90,7 +79,6 @@ func ExecuteCommand(cfg SSHConfig, command string) (stdout string, stderr string
 	}
 
 	if err != nil {
-		// Combine error and stderr for better context
 		return stdoutStr, stderrStr, fmt.Errorf("command '%s' failed: %w. Stderr: %s", command, err, stderrStr)
 	}
 
@@ -98,56 +86,45 @@ func ExecuteCommand(cfg SSHConfig, command string) (stdout string, stderr string
 	return stdoutStr, stderrStr, nil
 }
 
-// CheckRemoteFileExists checks if a file exists on the remote host using ls.
-// It requires providing explicit connection details.
-func CheckRemoteFileExists(cfg SSHConfig, remotePath string) (bool, error) {
-	// Use 'ls' and check exit code / stderr. ls exits 0 if file exists,
-	// non-zero (often 1 or 2) if not found.
-	// We redirect stderr to stdout to capture potential "No such file" messages in one place.
+// CheckFileExists implements BMCAdapter.CheckFileExists.
+func (a *bmcAdapter) CheckFileExists(remotePath string) (bool, error) {
+	// Use 'ls' and check exit code / stderr
 	cmdStr := fmt.Sprintf("ls %s 2>&1", remotePath)
-	stdout, _, err := ExecuteCommand(cfg, cmdStr)
+	stdout, _, err := a.ExecuteCommand(cmdStr)
 
 	if err == nil {
-		// Command succeeded (exit code 0), file exists
 		log.Printf("[BMC SSH LS] File %s exists.", remotePath)
 		return true, nil
 	}
 
-	// Command failed, check if it's because the file doesn't exist
-	// Note: Exact error message might vary. Common indicators:
 	if strings.Contains(stdout, "No such file or directory") ||
 		strings.Contains(stdout, "cannot access") ||
-		(err != nil && strings.Contains(err.Error(), "Process exited with status")) { // Check common error patterns
+		(err != nil && strings.Contains(err.Error(), "Process exited with status")) {
 
-		// Determine if it's specifically a 'not found' error based on exit code or message
 		if exitErr, ok := err.(*ssh.ExitError); ok {
-			// Common exit codes for ls not found: 1 or 2 depending on implementation
 			if exitErr.ExitStatus() == 1 || exitErr.ExitStatus() == 2 {
 				log.Printf("[BMC SSH LS] File %s does not exist (ls exit code %d).", remotePath, exitErr.ExitStatus())
-				return false, nil // File not found is not an execution error
+				return false, nil
 			}
 		}
-		// If we couldn't confirm exit code, rely on stdout message check
 		if strings.Contains(stdout, "No such file or directory") {
 			log.Printf("[BMC SSH LS] File %s does not exist (stderr message).", remotePath)
 			return false, nil
 		}
 	}
 
-	// If the error wasn't clearly a "not found" error, report it as a failure
 	log.Printf("[BMC SSH LS] Error checking file %s: %v. Output: %s", remotePath, err, stdout)
 	return false, fmt.Errorf("failed to check remote file %s: %w. Output: %s", remotePath, err, stdout)
 }
 
-// UploadFile uploads a local file to a remote path using SFTP.
-// It requires providing explicit connection details.
-func UploadFile(cfg SSHConfig, localPath, remotePath string) error {
-	sshConfig, err := getSSHClientConfig(cfg)
+// UploadFile implements BMCAdapter.UploadFile.
+func (a *bmcAdapter) UploadFile(localPath, remotePath string) error {
+	sshConfig, err := getSSHClientConfig(a.config)
 	if err != nil {
 		return fmt.Errorf("invalid SSH config: %w", err)
 	}
 
-	addr := fmt.Sprintf("%s:22", cfg.Host)
+	addr := fmt.Sprintf("%s:22", a.config.Host)
 	log.Printf("[BMC SCP UPLOAD] Connecting to %s...", addr)
 	conn, err := ssh.Dial("tcp", addr, sshConfig)
 	if err != nil {
@@ -164,14 +141,10 @@ func UploadFile(cfg SSHConfig, localPath, remotePath string) error {
 
 	remoteDir := filepath.Dir(remotePath)
 	log.Printf("[BMC SCP UPLOAD] Ensuring remote directory exists: %s", remoteDir)
-	// MkdirAll creates parent directories as needed.
 	if err := client.MkdirAll(remoteDir); err != nil {
-		// Ignore error if directory already exists, handle others
-		// Stat returns an error if path doesn't exist
 		if _, statErr := client.Stat(remoteDir); os.IsNotExist(statErr) {
 			return fmt.Errorf("failed to create remote directory %s: %w", remoteDir, err)
 		}
-		// If Stat succeeded, directory exists, ignore MkdirAll error
 		log.Printf("[BMC SCP UPLOAD] Remote directory %s likely already exists.", remoteDir)
 	} else {
 		log.Printf("[BMC SCP UPLOAD] Created remote directory %s.", remoteDir)
@@ -194,7 +167,6 @@ func UploadFile(cfg SSHConfig, localPath, remotePath string) error {
 	log.Printf("[BMC SCP UPLOAD] Copying data...")
 	bytesCopied, err := io.Copy(dstFile, srcFile)
 	if err != nil {
-		// Attempt to remove partially uploaded file on error
 		_ = client.Remove(remotePath)
 		return fmt.Errorf("failed to copy file content: %w", err)
 	}

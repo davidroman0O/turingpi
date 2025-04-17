@@ -6,46 +6,40 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
 )
 
-// Helper to establish SSH client connection (could be shared)
-func getNodeSSHClient(ip, user, password string) (*ssh.Client, error) {
-	config := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(password),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second, // Connection timeout
+// CopyFile implements NodeAdapter
+func (a *nodeAdapter) CopyFile(localPath, remotePath string, toRemote bool) error {
+	if err := a.checkClosed(); err != nil {
+		return err
 	}
-	addr := fmt.Sprintf("%s:22", ip)
-	client, err := ssh.Dial("tcp", addr, config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to dial %s: %w", addr, err)
-	}
-	return client, nil
-}
 
-// CopyFile transfers a file between the local machine and the remote node using SFTP.
-func CopyFile(ip, user, password, localPath, remotePath string, toRemote bool) error {
 	log.Printf("[NODE SFTP] Attempting file copy. ToRemote: %t, Local: %s, Remote: %s", toRemote, localPath, remotePath)
 
-	sshClient, err := getNodeSSHClient(ip, user, password)
+	sshClient, err := a.getSSHClient()
 	if err != nil {
 		return fmt.Errorf("failed to establish SSH connection for SFTP: %w", err)
 	}
-	defer sshClient.Close()
 
 	log.Println("[NODE SFTP] Creating SFTP client...")
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return fmt.Errorf("sftp client creation failed: %w", err)
 	}
-	defer sftpClient.Close()
+
+	// Track the SFTP client
+	a.mu.Lock()
+	a.sftp[sftpClient] = true
+	a.mu.Unlock()
+
+	defer func() {
+		sftpClient.Close()
+		a.mu.Lock()
+		delete(a.sftp, sftpClient)
+		a.mu.Unlock()
+	}()
 
 	if toRemote {
 		// Local to Remote
@@ -111,5 +105,3 @@ func CopyFile(ip, user, password, localPath, remotePath string, toRemote bool) e
 
 	return nil
 }
-
-// TODO: Implement CopyDirectory for recursive copying

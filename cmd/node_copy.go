@@ -3,8 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/node"
+	"github.com/davidroman0O/turingpi/pkg/tpi/node"
 	"github.com/spf13/cobra"
 )
 
@@ -65,14 +66,16 @@ Use --from-remote to copy from the node to the local machine.`,
 			nodeCopyDest,   // Always show user-provided destination
 		)
 
-		err := node.CopyFile(
-			nodeCopyIP,
-			nodeCopyUser,
-			nodeCopyPassword,
-			localPath,  // Actual local path for the function
-			remotePath, // Actual remote path for the function
-			toRemote,
-		)
+		// Create node adapter
+		adapter := node.NewNodeAdapter(node.SSHConfig{
+			Host:     nodeCopyIP,
+			User:     nodeCopyUser,
+			Password: nodeCopyPassword,
+			Timeout:  10 * time.Second,
+		})
+		defer adapter.Close()
+
+		err := adapter.CopyFile(localPath, remotePath, toRemote)
 
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nFile copy failed: %v\n", err)

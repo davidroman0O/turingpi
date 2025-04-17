@@ -9,7 +9,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/node"
+	"github.com/davidroman0O/turingpi/pkg/tpi/node"
 	"gopkg.in/yaml.v3"
 )
 
@@ -116,12 +116,16 @@ func executeCommandStep(step Step, execCtx Context) error {
 		if execCtx.NodeIP == "" || execCtx.User == "" || execCtx.InitialPassword == "" {
 			return fmt.Errorf("missing node IP, user, or password in context for remote command")
 		}
-		stdout, stderr, err := node.ExecuteCommand(
-			execCtx.NodeIP,
-			execCtx.User,
-			execCtx.InitialPassword, // Using InitialPassword for connection
-			executableCommand,
-		)
+
+		// Create node adapter
+		adapter := node.NewNodeAdapter(node.SSHConfig{
+			Host:     execCtx.NodeIP,
+			User:     execCtx.User,
+			Password: execCtx.InitialPassword,
+			Timeout:  step.timeoutDur,
+		})
+
+		stdout, stderr, err := adapter.ExecuteCommand(executableCommand)
 		// Log output regardless of error
 		log.Printf("Remote Command Stdout: %s", stdout)
 		log.Printf("Remote Command Stderr: %s", stderr)
@@ -157,9 +161,7 @@ func executeExpectStep(step Step, execCtx Context) error {
 		processedSteps[i].Send = sendBuf.String()
 	}
 
-	// Extract necessary context for node.ExpectAndSend
-	// Note: Assumes context contains User, InitialPassword if needed for the specific interaction
-	// We might need more specific user/pass fields in the Step struct for remote actions.
+	// Extract necessary context for node adapter
 	user := execCtx.User
 	password := execCtx.InitialPassword // Assuming this is the password for this expect sequence
 	if password == "" {
@@ -167,22 +169,24 @@ func executeExpectStep(step Step, execCtx Context) error {
 		return fmt.Errorf("password required in context for remote expect step")
 	}
 
+	// Create node adapter
+	adapter := node.NewNodeAdapter(node.SSHConfig{
+		Host:     execCtx.NodeIP,
+		User:     user,
+		Password: password,
+		Timeout:  step.timeoutDur,
+	})
+
 	log.Printf("Executing remote expect script on %s", execCtx.NodeIP)
-	finalOutput, err := node.ExpectAndSend(
-		execCtx.NodeIP,
-		user,
-		password,
-		processedSteps,
-		step.timeoutDur,
-	)
+	finalOutput, err := adapter.ExpectAndSend(processedSteps, step.timeoutDur)
 
 	if err != nil {
 		// Log output even on error
-		log.Printf("Expect script failed. Final output snippet:\n%s", node.GetLastLines(finalOutput, 15))
+		log.Printf("Expect script failed. Final output:\n%s", finalOutput)
 		return fmt.Errorf("expect script execution failed: %w", err)
 	}
 
-	log.Printf("Expect script finished successfully. Final output snippet:\n%s", node.GetLastLines(finalOutput, 15))
+	log.Printf("Expect script finished successfully. Final output:\n%s", finalOutput)
 
 	// TODO: Add verification logic based on finalOutput?
 	// E.g., a step could have an optional `verify_contains` field.
@@ -200,65 +204,41 @@ func executeCopyStep(step Step, execCtx Context) error {
 		return fmt.Errorf("recursive directory copy is not yet implemented")
 	}
 
-	// Validate required fields
-	if step.CopySource == "" || step.CopyDest == "" {
-		return fmt.Errorf("copy_source and copy_dest are required for copy steps")
-	}
-	if execCtx.NodeIP == "" || execCtx.User == "" || execCtx.InitialPassword == "" {
-		return fmt.Errorf("missing node IP, user, or password in context for remote copy")
-	}
-
 	// Apply templating to source and destination paths
-	renderPath := func(pathTemplate string) (string, error) {
-		tmpl, err := template.New("path").Parse(pathTemplate)
-		if err != nil {
-			return "", fmt.Errorf("failed to parse path template '%s': %w", pathTemplate, err)
-		}
-		var pathBuf bytes.Buffer
-		if err := tmpl.Execute(&pathBuf, execCtx); err != nil {
-			return "", fmt.Errorf("failed to execute path template '%s': %w", pathTemplate, err)
-		}
-		return pathBuf.String(), nil
-	}
-
-	sourcePath, err := renderPath(step.CopySource)
+	tmpl, err := template.New("paths").Parse(step.CopySource)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse source path template: %w", err)
 	}
-	destPath, err := renderPath(step.CopyDest)
+	var sourceBuf bytes.Buffer
+	if err := tmpl.Execute(&sourceBuf, execCtx); err != nil {
+		return fmt.Errorf("failed to execute source path template: %w", err)
+	}
+	sourcePath := sourceBuf.String()
+
+	tmpl, err = template.New("paths").Parse(step.CopyDest)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse destination path template: %w", err)
 	}
-
-	// Determine local/remote paths based on direction
-	toRemote := !step.CopyFromRemote
-	localPath := sourcePath
-	remotePath := destPath
-	if !toRemote { // Copying From Remote to Local
-		localPath = destPath
-		remotePath = sourcePath
+	var destBuf bytes.Buffer
+	if err := tmpl.Execute(&destBuf, execCtx); err != nil {
+		return fmt.Errorf("failed to execute destination path template: %w", err)
 	}
+	destPath := destBuf.String()
 
-	direction := "Local -> Remote"
-	if !toRemote {
-		direction = "Remote -> Local"
-	}
+	// Create node adapter
+	adapter := node.NewNodeAdapter(node.SSHConfig{
+		Host:     execCtx.NodeIP,
+		User:     execCtx.User,
+		Password: execCtx.InitialPassword,
+		Timeout:  step.timeoutDur,
+	})
 
-	log.Printf("Copying file on node %s (%s): %s -> %s", execCtx.NodeIP, direction, sourcePath, destPath)
-
-	err = node.CopyFile(
-		execCtx.NodeIP,
-		execCtx.User,
-		execCtx.InitialPassword, // Using InitialPassword for connection
-		localPath,               // Actual local path for the function
-		remotePath,              // Actual remote path for the function
-		toRemote,
-	)
-
+	log.Printf("Copying file: %s -> %s (from_remote: %t)", sourcePath, destPath, step.CopyFromRemote)
+	err = adapter.CopyFile(sourcePath, destPath, !step.CopyFromRemote)
 	if err != nil {
 		return fmt.Errorf("file copy failed: %w", err)
 	}
 
-	log.Println("File copy finished successfully.")
+	log.Printf("File copy completed successfully.")
 	return nil
 }

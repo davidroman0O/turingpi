@@ -3,8 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/node"
+	"github.com/davidroman0O/turingpi/pkg/tpi/node"
 	"github.com/spf13/cobra"
 )
 
@@ -46,12 +47,16 @@ Stdout and stderr from the remote command will be printed locally.`,
 
 		fmt.Printf("Executing command on node %s...\n", nodeExecIP)
 
-		stdout, stderr, err := node.ExecuteCommand(
-			nodeExecIP,
-			nodeExecUser,
-			nodeExecPassword,
-			nodeExecCommand,
-		)
+		// Create node adapter
+		adapter := node.NewNodeAdapter(node.SSHConfig{
+			Host:     nodeExecIP,
+			User:     nodeExecUser,
+			Password: nodeExecPassword,
+			Timeout:  10 * time.Second,
+		})
+		defer adapter.Close()
+
+		stdout, stderr, err := adapter.ExecuteCommand(nodeExecCommand)
 
 		// Print stdout/stderr regardless of error for context
 		if stdout != "" {

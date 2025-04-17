@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/node" // Import the new package
+	"github.com/davidroman0O/turingpi/pkg/tpi/node" // Import the new package
 	"github.com/spf13/cobra"
 	// "golang.org/x/crypto/ssh" // No longer needed directly here
 	// "bufio"
@@ -44,6 +44,14 @@ Uses the default initial credentials (ubuntu/ubuntu) unless overridden.`,
 			os.Exit(1)
 		}
 
+		// Create node adapter
+		adapter := node.NewNodeAdapter(node.SSHConfig{
+			Host:     postInstallNodeIP,
+			User:     postInstallInitialUser,
+			Password: postInstallInitialPass,
+			Timeout:  30 * time.Second,
+		})
+
 		// Define the interaction steps for Ubuntu password change
 		steps := []node.InteractionStep{
 			{Expect: "Current password:", Send: postInstallInitialPass, LogMsg: "Sending initial password..."},
@@ -51,16 +59,8 @@ Uses the default initial credentials (ubuntu/ubuntu) unless overridden.`,
 			{Expect: "Retype new password:", Send: postInstallNewPass, LogMsg: "Retyping new password..."},
 		}
 
-		interactionTimeout := 30 * time.Second
-
 		// Execute the interaction
-		finalOutput, err := node.ExpectAndSend(
-			postInstallNodeIP,
-			postInstallInitialUser,
-			postInstallInitialPass,
-			steps,
-			interactionTimeout,
-		)
+		finalOutput, err := adapter.ExpectAndSend(steps, 30*time.Second)
 
 		// --- Verification ---
 		// Check for errors first
@@ -71,8 +71,8 @@ Uses the default initial credentials (ubuntu/ubuntu) unless overridden.`,
 			} else {
 				fmt.Fprintf(os.Stderr, "\nPost-installation failed: %v\n", err)
 			}
-			// Log final output snippet even on error for debugging
-			log.Printf("Final output before error:\n%s", node.GetLastLines(finalOutput, 15))
+			// Log final output for debugging
+			log.Printf("Final output before error:\n%s", finalOutput)
 			os.Exit(1)
 		}
 

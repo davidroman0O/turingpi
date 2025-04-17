@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/bmc" // Import the new package
 	"github.com/davidroman0O/turingpi/pkg/state"
+	"github.com/davidroman0O/turingpi/pkg/tpi/bmc" // Import the new package
 
 	"github.com/spf13/cobra"
 	// No longer needed: github.com/davidroman0O/firm-go
@@ -88,12 +88,15 @@ Workflow:
 			Timeout:  20 * time.Second, // Or make configurable
 		}
 
+		// Create BMC adapter
+		bmcAdapter := bmc.NewBMCAdapter(bmcSSHConfig)
+
 		// --- Installation Sequence ---
 		var err error
 
 		// 1. Check if uncompressed image exists on BMC
 		log.Printf("Checking for existing image on BMC: %s\n", remoteImgPath)
-		imgExists, err := bmc.CheckRemoteFileExists(bmcSSHConfig, remoteImgPath)
+		imgExists, err := bmcAdapter.CheckFileExists(remoteImgPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nError checking remote file: %v\n", err)
 			os.Exit(1)
@@ -104,7 +107,7 @@ Workflow:
 
 			// 2. Transfer compressed image if needed
 			log.Printf("Transferring %s to BMC:%s\n", localAbsImagePath, remoteXZPath)
-			err = bmc.UploadFile(bmcSSHConfig, localAbsImagePath, remoteXZPath)
+			err = bmcAdapter.UploadFile(localAbsImagePath, remoteXZPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "\nError uploading image: %v\n", err)
 				os.Exit(1)
@@ -114,10 +117,16 @@ Workflow:
 			// 3. Decompress on BMC
 			log.Printf("Decompressing image on BMC: %s\n", remoteXZPath)
 			cmdStr := fmt.Sprintf("unxz -f %s", remoteXZPath) // -f forces overwrite
-			_, _, err = bmc.ExecuteCommand(bmcSSHConfig, cmdStr)
+			stdout, stderr, err := bmcAdapter.ExecuteCommand(cmdStr)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "\nError decompressing image on BMC: %v\n", err)
+				fmt.Fprintf(os.Stderr, "\nError decompressing image on BMC: %v\nStderr: %s\n", err, stderr)
 				os.Exit(1)
+			}
+			if stderr != "" {
+				log.Printf("Warning: stderr from decompression: %s", stderr)
+			}
+			if stdout != "" {
+				log.Printf("Decompression output: %s", stdout)
 			}
 			log.Println("Decompression successful on BMC.")
 		} else {
@@ -132,11 +141,17 @@ Workflow:
 		}
 
 		flashCmdStr := fmt.Sprintf("tpi flash --node %s -i %s", nodeStr, remoteImgPath)
-		_, _, err = bmc.ExecuteCommand(bmcSSHConfig, flashCmdStr)
+		stdout, stderr, err := bmcAdapter.ExecuteCommand(flashCmdStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "\nError flashing node: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\nError flashing node: %v\nStderr: %s\n", err, stderr)
 			_ = state.UpdateNodeState(ubuntuNodeID, func(s *state.NodeStatus) { s.Status = "install_failed"; s.Error = err.Error() })
 			os.Exit(1)
+		}
+		if stderr != "" {
+			log.Printf("Warning: stderr from flash: %s", stderr)
+		}
+		if stdout != "" {
+			log.Printf("Flash output: %s", stdout)
 		}
 		log.Println("Flashing completed successfully.")
 
@@ -144,27 +159,39 @@ Workflow:
 		log.Println("Powering off node...")
 		time.Sleep(2 * time.Second)
 		powerOffCmdStr := fmt.Sprintf("tpi power off --node %s", nodeStr)
-		_, _, err = bmc.ExecuteCommand(bmcSSHConfig, powerOffCmdStr)
+		stdout, stderr, err = bmcAdapter.ExecuteCommand(powerOffCmdStr)
 		if err != nil {
 			// Log warning but proceed? Or fail?
-			fmt.Fprintf(os.Stderr, "\nWarning: Power off command failed (proceeding anyway): %v\n", err)
+			fmt.Fprintf(os.Stderr, "\nWarning: Power off command failed (proceeding anyway): %v\nStderr: %s\n", err, stderr)
 			// Decide if this should be fatal or just a warning
 			// os.Exit(1)
 		} else {
+			if stderr != "" {
+				log.Printf("Warning: stderr from power off: %s", stderr)
+			}
+			if stdout != "" {
+				log.Printf("Power off output: %s", stdout)
+			}
 			log.Println("Power off successful.")
 		}
 
 		log.Println("Powering on node...")
 		time.Sleep(2 * time.Second)
 		powerOnCmdStr := fmt.Sprintf("tpi power on --node %s", nodeStr)
-		_, _, err = bmc.ExecuteCommand(bmcSSHConfig, powerOnCmdStr)
+		stdout, stderr, err = bmcAdapter.ExecuteCommand(powerOnCmdStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "\nError powering on node: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\nError powering on node: %v\nStderr: %s\n", err, stderr)
 			_ = state.UpdateNodeState(ubuntuNodeID, func(s *state.NodeStatus) {
 				s.Status = "install_failed"
 				s.Error = fmt.Sprintf("power on failed: %v", err)
 			})
 			os.Exit(1)
+		}
+		if stderr != "" {
+			log.Printf("Warning: stderr from power on: %s", stderr)
+		}
+		if stdout != "" {
+			log.Printf("Power on output: %s", stdout)
 		}
 		log.Println("Power on successful.")
 

@@ -3,7 +3,7 @@ package postinstall
 import (
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/node"
+	"github.com/davidroman0O/turingpi/pkg/tpi/node"
 )
 
 // StepType defines the type of post-install action.

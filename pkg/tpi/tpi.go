@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/bmc" // Import bmc package
+	"github.com/davidroman0O/turingpi/pkg/tpi/bmc" // Import from new location
 )
 
 // TuringPiExecutor holds the processed configuration and runtime state

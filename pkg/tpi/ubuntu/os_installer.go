@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/bmc"
-	"github.com/davidroman0O/turingpi/pkg/node"
 	"github.com/davidroman0O/turingpi/pkg/tpi" // Base tpi types
+	"github.com/davidroman0O/turingpi/pkg/tpi/bmc"
+	"github.com/davidroman0O/turingpi/pkg/tpi/node"
 	// TODO: Need bmc package for actual flashing
 	// "github.com/davidroman0O/turingpi/pkg/bmc"
 )
@@ -149,7 +149,8 @@ func (b *UbuntuOSInstallerBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) err
 // flashRK1 implements the flashing process specifically for RK1 boards.
 func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster) error {
 	log.Println("[flashRK1] Starting RK1 flashing process...")
-	bmcSSHConfig := cluster.GetBMCSSHConfig()
+	bmcConfig := cluster.GetBMCSSHConfig()
+	bmcAdapter := bmc.NewBMCAdapter(bmcConfig)
 	nodeStr := fmt.Sprintf("%d", b.nodeID)
 
 	localImagePath := b.imageResult.ImagePath // Path to the *.img.xz file in the local cache
@@ -166,7 +167,7 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 
 	// 1. Check if uncompressed image exists on BMC
 	log.Printf("[flashRK1] Checking for existing uncompressed image on BMC: %s", remoteImgPath)
-	imgExists, err := bmc.CheckRemoteFileExists(bmcSSHConfig, remoteImgPath)
+	imgExists, err := bmcAdapter.CheckFileExists(remoteImgPath)
 	if err != nil {
 		// Treat check failure as potentially fatal, as we can't determine state
 		return fmt.Errorf("failed to check for existing uncompressed image %s on BMC: %w", remoteImgPath, err)
@@ -178,7 +179,7 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 		// 2. Check/Transfer compressed image
 		log.Printf("[flashRK1] Checking/Uploading compressed image %s to BMC:%s", localImagePath, remoteXZPath)
 		// TODO: Add check for existing XZ? For now, always upload if uncompressed is missing.
-		err = bmc.UploadFile(bmcSSHConfig, localImagePath, remoteXZPath)
+		err = bmcAdapter.UploadFile(localImagePath, remoteXZPath)
 		if err != nil {
 			return fmt.Errorf("failed to upload image %s to %s: %w", localImagePath, remoteXZPath, err)
 		}
@@ -189,7 +190,7 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 		// Use -f to force overwrite if xz somehow exists but img doesn't.
 		// Use -k to keep the .xz file after decompression?
 		cmdStr := fmt.Sprintf("unxz -f %s", remoteXZPath)
-		_, _, err = bmc.ExecuteCommand(bmcSSHConfig, cmdStr)
+		_, _, err = bmcAdapter.ExecuteCommand(cmdStr)
 		if err != nil {
 			// Attempt cleanup? Remove XZ? Difficult state.
 			return fmt.Errorf("failed to decompress image %s on BMC: %w", remoteXZPath, err)
@@ -204,7 +205,7 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 	log.Printf("[flashRK1] Starting flash command: tpi flash -n %s -i %s", nodeStr, remoteImgPath)
 	// TODO: Consider timeout for flashing?
 	flashCmdStr := fmt.Sprintf("tpi flash --node %s -i %s", nodeStr, remoteImgPath)
-	_, _, err = bmc.ExecuteCommand(bmcSSHConfig, flashCmdStr)
+	_, _, err = bmcAdapter.ExecuteCommand(flashCmdStr)
 	if err != nil {
 		return fmt.Errorf("tpi flash command failed for node %s with image %s: %w", nodeStr, remoteImgPath, err)
 	}
@@ -213,7 +214,7 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 	// 5. Power cycle the node
 	log.Println("[flashRK1] Power cycling node...")
 	powerOffCmd := fmt.Sprintf("tpi power off --node %s", nodeStr)
-	_, _, err = bmc.ExecuteCommand(bmcSSHConfig, powerOffCmd)
+	_, _, err = bmcAdapter.ExecuteCommand(powerOffCmd)
 	if err != nil {
 		// Log warning but maybe proceed? Power on might still work.
 		log.Printf("Warning: Power off command failed for node %s: %v", nodeStr, err)
@@ -223,7 +224,7 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 	time.Sleep(2 * time.Second)
 
 	powerOnCmd := fmt.Sprintf("tpi power on --node %s", nodeStr)
-	_, _, err = bmc.ExecuteCommand(bmcSSHConfig, powerOnCmd)
+	_, _, err = bmcAdapter.ExecuteCommand(powerOnCmd)
 	if err != nil {
 		// This is more critical - if power on fails, node is left off.
 		return fmt.Errorf("power on command failed for node %s: %w", nodeStr, err)
@@ -261,25 +262,25 @@ func (b *UbuntuOSInstallerBuilder) flashRK1(ctx tpi.Context, cluster tpi.Cluster
 	// Import node pkg for SSH interaction
 	log.Printf("[flashRK1] Attempting to connect to node and handle initial password change...")
 
-	// Use node.ExpectAndSend to handle the interactive password change
-	// This is similar to what post_install_ubuntu.go does
+	// Create node adapter for password change
+	nodeAdapter := node.NewNodeAdapter(node.SSHConfig{
+		Host:     ipAddress,
+		User:     "ubuntu", // Default Ubuntu username
+		Password: initialPassword,
+		Timeout:  30 * time.Second,
+	})
+
+	// Use ExpectAndSend to handle the interactive password change
 	steps := []node.InteractionStep{
 		{Expect: "Current password:", Send: initialPassword, LogMsg: "Sending initial password..."},
 		{Expect: "New password:", Send: newPassword, LogMsg: "Sending new password..."},
 		{Expect: "Retype new password:", Send: newPassword, LogMsg: "Retyping new password..."},
 	}
-	interactionTimeout := 30 * time.Second
 
-	finalOutput, err := node.ExpectAndSend(
-		ipAddress,
-		"ubuntu", // Default Ubuntu username
-		initialPassword,
-		steps,
-		interactionTimeout,
-	)
+	finalOutput, err := nodeAdapter.ExpectAndSend(steps, 30*time.Second)
 	if err != nil {
 		log.Printf("[flashRK1] Password change interaction failed: %v", err)
-		log.Printf("[flashRK1] Final output: %s", node.GetLastLines(finalOutput, 15))
+		log.Printf("[flashRK1] Final output: %s", finalOutput)
 		return fmt.Errorf("password change failed after flashing: %w", err)
 	}
 

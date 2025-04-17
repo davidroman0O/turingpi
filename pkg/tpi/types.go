@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/bmc"
+	"github.com/davidroman0O/turingpi/pkg/tpi/bmc"
 )
 
 // NodeID represents the numeric identifier for a compute node slot.
