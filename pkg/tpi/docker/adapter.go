@@ -2,10 +2,13 @@ package docker
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
 )
+
+/// can use `docker context list`
 
 // DockerAdapter provides an interface for imageops to interact with Docker
 type DockerAdapter struct {
@@ -42,17 +45,29 @@ func (a *DockerAdapter) ExecuteCommand(cmd string) (string, error) {
 
 // CopyFileToContainer copies a file from the host to the container
 func (a *DockerAdapter) CopyFileToContainer(localPath, containerPath string) error {
-	// Use the docker cp command
+	// Make sure both paths are specified
+	if localPath == "" || containerPath == "" {
+		return fmt.Errorf("both localPath and containerPath must be specified")
+	}
+
+	// Ensure local file exists
+	if _, err := os.Stat(localPath); os.IsNotExist(err) {
+		return fmt.Errorf("local file does not exist: %s", localPath)
+	}
+
+	// Use the docker cp command with proper escaping
 	copyToDockerCmd := fmt.Sprintf("docker cp %s %s:%s",
 		localPath,
 		a.Container.Config.ContainerName,
 		containerPath)
 
+	// Use bash -c to execute the command
 	copyCmd := exec.Command("bash", "-c", copyToDockerCmd)
 	output, err := copyCmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to copy file to Docker: %w\nOutput: %s", err, string(output))
 	}
+
 	return nil
 }
 
