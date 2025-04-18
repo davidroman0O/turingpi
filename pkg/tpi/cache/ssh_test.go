@@ -462,14 +462,35 @@ func (m *mockSSHClient) NewSession() (*ssh.Session, error) {
 }
 
 func TestSSHCacheVerifyIntegrity(t *testing.T) {
-	config := loadSSHTestConfig(t)
+	cfg := SSHConfig{
+		Host:     "localhost",
+		Port:     22,
+		User:     "test",
+		Password: "test",
+	}
 	cacheDir := "/tmp/sshcache_test"
-
-	cache, err := NewSSHCache(*config, cacheDir)
+	cache, err := NewSSHCache(cfg, cacheDir)
 	if err != nil {
 		t.Fatalf("Failed to create SSHCache: %v", err)
 	}
 	defer cache.Close()
+
+	// Test putting a file
+	content := "test content"
+	meta := Metadata{
+		Key:         "test-key",
+		Filename:    "test.txt",
+		ContentType: "text/plain",
+		Size:        int64(len(content)),
+		ModTime:     time.Now(),
+		Tags:        map[string]string{"type": "test"},
+		OSType:      "linux",
+		OSVersion:   "5.10",
+	}
+	_, err = cache.Put(context.Background(), "test-key", meta, strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("Failed to put file: %v", err)
+	}
 
 	tests := []struct {
 		name          string

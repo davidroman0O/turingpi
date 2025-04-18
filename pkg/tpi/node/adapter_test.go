@@ -1,20 +1,25 @@
 package node
 
 import (
-	"os"
-	"path/filepath"
+	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
+
+	tpicache "github.com/davidroman0O/turingpi/pkg/tpi/cache"
 )
 
 // getTestConfig returns a standard test configuration for the real Turing Pi hardware
 func getTestConfig() SSHConfig {
 	return SSHConfig{
-		Host:     "192.168.1.90",
-		User:     "root",
-		Password: "turing",
-		Timeout:  10 * time.Second,
+		Host:           "192.168.1.90",
+		User:           "root",
+		Password:       "turing",
+		Timeout:        10 * time.Second,
+		MaxRetries:     3,
+		RetryDelay:     1 * time.Second,
+		RetryIncrement: 2 * time.Second,
 	}
 }
 
@@ -74,35 +79,48 @@ func TestNodeAdapter_ConnectionManagement(t *testing.T) {
 		t.Errorf("Expected 0 sessions after command, got %d", len(a.sessions))
 	}
 
-	// Test that CopyFile manages SFTP connections
-	content := []byte("test content")
-	tmpfile, err := os.CreateTemp("", "node-test-*.txt")
+	// Test file operations
+	cacheObj := adapter.FileOperations()
+	if cacheObj == nil {
+		t.Fatal("Expected non-nil cache from FileOperations")
+	}
+
+	// Test putting a file
+	content := "test content"
+	meta := tpicache.Metadata{
+		Key:         "test/file",
+		Filename:    "test.txt",
+		ContentType: "text/plain",
+		Size:        int64(len(content)),
+		ModTime:     time.Now(),
+		Tags:        map[string]string{"type": "test"},
+		OSType:      "linux",
+		OSVersion:   "5.10",
+	}
+	_, err = cacheObj.Put(context.Background(), "test/file", meta, strings.NewReader(content))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Failed to put file: %v", err)
 	}
-	defer os.Remove(tmpfile.Name())
-	if _, err := tmpfile.Write(content); err != nil {
-		t.Fatal(err)
-	}
-	tmpfile.Close()
 
-	remotePath := filepath.Join("/tmp", filepath.Base(tmpfile.Name()))
-	err = adapter.CopyFile(tmpfile.Name(), remotePath, true)
+	// Test getting the file
+	getMeta, reader, err := cacheObj.Get(context.Background(), "test/file", true)
 	if err != nil {
-		t.Fatalf("CopyFile failed: %v", err)
+		t.Fatalf("Failed to get file: %v", err)
+	}
+	defer reader.Close()
+
+	gotContent, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("Failed to read content: %v", err)
+	}
+	if string(gotContent) != content {
+		t.Errorf("Content mismatch. Got %q, want %q", string(gotContent), content)
+	}
+	if getMeta.Filename != meta.Filename {
+		t.Errorf("Metadata filename mismatch. Got %q, want %q", getMeta.Filename, meta.Filename)
 	}
 
-	// Verify that SFTP client is cleaned up
-	if len(a.sftp) != 0 {
-		t.Errorf("Expected 0 SFTP clients after copy, got %d", len(a.sftp))
-	}
-
-	// Clean up remote file
-	if _, _, err := adapter.ExecuteCommand("rm " + remotePath); err != nil {
-		t.Logf("Warning: Failed to clean up remote file: %v", err)
-	}
-
-	// Close everything
+	// Clean up everything
 	if err := adapter.Close(); err != nil {
 		t.Errorf("Close failed: %v", err)
 	}
@@ -180,94 +198,83 @@ func TestNodeAdapter_ExpectAndSend(t *testing.T) {
 	}
 }
 
-func TestNodeAdapter_CopyFile(t *testing.T) {
-	adapter := NewNodeAdapter(getTestConfig())
+func TestNodeAdapter_RetryLogic(t *testing.T) {
+	// Create adapter with short retry settings for testing
+	config := getTestConfig()
+	config.MaxRetries = 2
+	config.RetryDelay = 100 * time.Millisecond
+	config.RetryIncrement = 100 * time.Millisecond
+	adapter := NewNodeAdapter(config)
 	defer adapter.Close()
 
-	// Create a temporary test file
-	content := []byte("test content from Turing Pi node adapter test")
-	tmpfile, err := os.CreateTemp("", "node-test-*.txt")
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
+	// Test retry on connection failure (use invalid host)
+	badConfig := config
+	badConfig.Host = "nonexistent.host"
+	badAdapter := NewNodeAdapter(badConfig)
+	defer badAdapter.Close()
 
-	if _, err := tmpfile.Write(content); err != nil {
-		t.Fatalf("Failed to write to temp file: %v", err)
-	}
-	if err := tmpfile.Close(); err != nil {
-		t.Fatalf("Failed to close temp file: %v", err)
-	}
+	start := time.Now()
+	_, _, err := badAdapter.ExecuteCommand("echo test")
+	duration := time.Since(start)
 
-	// Upload the file
-	remotePath := filepath.Join("/tmp", filepath.Base(tmpfile.Name()))
-	err = adapter.CopyFile(tmpfile.Name(), remotePath, true)
-	if err != nil {
-		t.Fatalf("CopyFile (upload) failed: %v", err)
+	if err == nil {
+		t.Error("Expected error for non-existent host")
 	}
 
-	// Verify file exists and content matches
-	stdout, stderr, err := adapter.ExecuteCommand("cat " + remotePath)
-	if err != nil {
-		t.Errorf("Failed to read uploaded file: %v\nStderr: %s", err, stderr)
-	}
-	if stdout != string(content) {
-		t.Errorf("File content mismatch.\nExpected: %s\nGot: %s", content, stdout)
-	}
-
-	// Download the file to a new location
-	downloadPath := tmpfile.Name() + ".downloaded"
-	defer os.Remove(downloadPath)
-
-	err = adapter.CopyFile(downloadPath, remotePath, false)
-	if err != nil {
-		t.Fatalf("CopyFile (download) failed: %v", err)
-	}
-
-	// Verify downloaded content
-	downloadedContent, err := os.ReadFile(downloadPath)
-	if err != nil {
-		t.Fatalf("Failed to read downloaded file: %v", err)
-	}
-	if string(downloadedContent) != string(content) {
-		t.Errorf("Downloaded content mismatch.\nExpected: %s\nGot: %s", content, downloadedContent)
-	}
-
-	// Clean up remote file
-	_, _, err = adapter.ExecuteCommand("rm " + remotePath)
-	if err != nil {
-		t.Logf("Warning: Failed to clean up remote file: %v", err)
+	// Should have tried 3 times (initial + 2 retries)
+	expectedMinDuration := 300 * time.Millisecond // Initial + 2 retries with 100ms delay each
+	if duration < expectedMinDuration {
+		t.Errorf("Retry duration too short. Got %v, expected at least %v", duration, expectedMinDuration)
 	}
 }
 
-func TestNodeAdapter_RealHardwareCommands(t *testing.T) {
+func TestNodeAdapter_BMCCommands(t *testing.T) {
 	adapter := NewNodeAdapter(getTestConfig())
 	defer adapter.Close()
 
-	// Test getting system information
-	stdout, stderr, err := adapter.ExecuteCommand("uname -a")
-	if err != nil {
-		t.Errorf("Failed to get system info: %v\nStderr: %s", err, stderr)
-	}
-	if stdout == "" {
-		t.Error("Expected non-empty output from 'uname -a'")
+	tests := []struct {
+		name          string
+		command       string
+		expectError   bool
+		expectOutput  string
+		expectInError string
+	}{
+		{
+			name:         "power status",
+			command:      "tpi power status --node 1",
+			expectError:  false,
+			expectOutput: "node1: On",
+		},
+		{
+			name:          "invalid command",
+			command:       "tpi invalid command",
+			expectError:   true,
+			expectInError: "failed",
+		},
 	}
 
-	// Test disk space information
-	stdout, stderr, err = adapter.ExecuteCommand("df -h /")
-	if err != nil {
-		t.Errorf("Failed to get disk space info: %v\nStderr: %s", err, stderr)
-	}
-	if stdout == "" {
-		t.Error("Expected non-empty output from 'df -h /'")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, stderr, err := adapter.ExecuteBMCCommand(tt.command)
 
-	// Test memory information
-	stdout, stderr, err = adapter.ExecuteCommand("free -h")
-	if err != nil {
-		t.Errorf("Failed to get memory info: %v\nStderr: %s", err, stderr)
-	}
-	if stdout == "" {
-		t.Error("Expected non-empty output from 'free -h'")
+			if tt.expectError && err == nil {
+				t.Error("Expected error but got none")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+
+			if tt.expectOutput != "" && !strings.Contains(stdout, tt.expectOutput) {
+				t.Errorf("Expected stdout to contain %q, got %q", tt.expectOutput, stdout)
+			}
+
+			if tt.expectInError != "" && err != nil && !strings.Contains(err.Error(), tt.expectInError) {
+				t.Errorf("Expected error to contain %q, got %q", tt.expectInError, err.Error())
+			}
+
+			if stderr != "" {
+				t.Logf("Command stderr: %s", stderr)
+			}
+		})
 	}
 }
