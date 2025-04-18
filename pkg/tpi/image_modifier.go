@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/davidroman0O/turingpi/pkg/tpi/internal/imageops" // Internal helpers
+	"github.com/davidroman0O/turingpi/pkg/tpi/imageops"
 )
 
 // --- ImageModifier Implementation ---

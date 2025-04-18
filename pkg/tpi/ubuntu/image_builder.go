@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/davidroman0O/turingpi/pkg/tpi"                   // Base tpi types
-	"github.com/davidroman0O/turingpi/pkg/tpi/internal/imageops" // Internal helpers
-	"github.com/davidroman0O/turingpi/pkg/tpi/platform"          // Platform detection
+	"github.com/davidroman0O/turingpi/pkg/tpi" // Base tpi types
+	"github.com/davidroman0O/turingpi/pkg/tpi/imageops"
+	"github.com/davidroman0O/turingpi/pkg/tpi/platform" // Platform detection
 )
 
 // UbuntuImageBuilder defines the configuration for Phase 1: Image Customization for Ubuntu.
@@ -220,12 +220,22 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 
 		// Initialize Docker with proper configuration
 		// Note: We add the output directory as a mount point for Docker to access it
-		err := imageops.InitDockerConfig(filepath.Dir(b.baseImageXZPath), tempWorkDir, b.outputDirectory)
+		err := imageops.InitAdapter(filepath.Dir(b.baseImageXZPath), tempWorkDir, b.outputDirectory)
 		if err != nil {
-			return b.failPhase(cluster, fmt.Errorf("failed to initialize Docker: %w", err))
+			return b.failPhase(cluster, fmt.Errorf("failed to initialize adapter: %w", err))
 		}
-		log.Printf("Docker configuration initialized for image operations")
+		log.Printf("Image operations adapter initialized")
+	} else {
+		// Even on Linux, we need to initialize the adapter
+		err := imageops.InitAdapter(filepath.Dir(b.baseImageXZPath), tempWorkDir, b.outputDirectory)
+		if err != nil {
+			return b.failPhase(cluster, fmt.Errorf("failed to initialize adapter: %w", err))
+		}
+		log.Printf("Image operations adapter initialized")
 	}
+
+	// Ensure we clean up the adapter when done
+	defer imageops.CleanupAdapter()
 
 	// --- Execute Image Preparation ---
 	ipWithoutCIDR := b.networkConfig.IPCIDR
