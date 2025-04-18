@@ -1,6 +1,7 @@
 package ubuntu
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"log"
@@ -108,7 +109,10 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	defer func() {
 		if dockerCleanupNeeded && imageops.DockerAdapter() != nil {
 			log.Printf("Cleaning up Docker resources in deferred function...")
-			imageops.DockerAdapter().Cleanup()
+			// Create a timeout context for cleanup
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			imageops.DockerAdapter().Cleanup(cleanupCtx)
 		}
 	}()
 
