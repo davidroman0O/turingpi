@@ -1,6 +1,7 @@
 package imageops
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -43,7 +44,8 @@ func (a *imageOpsAdapter) initDocker(sourceDir, tempDir, outputDir string) error
 	maxRetries := 3
 	for retry := 0; retry < maxRetries; retry++ {
 		log.Printf("Attempting to create Docker adapter (attempt %d/%d)...\n", retry+1, maxRetries)
-		a.dockerAdapter, err = docker.NewAdapterWithConfig(config)
+		ctx := context.Background()
+		a.dockerAdapter, err = docker.NewAdapter(ctx, sourceDir, tempDir, outputDir)
 		if err == nil {
 			break
 		}
@@ -59,7 +61,8 @@ func (a *imageOpsAdapter) initDocker(sourceDir, tempDir, outputDir string) error
 	if err != nil {
 		// Clear any partially initialized adapter
 		if a.dockerAdapter != nil {
-			a.dockerAdapter.Cleanup()
+			ctx := context.Background()
+			a.dockerAdapter.Cleanup(ctx)
 		}
 		a.dockerAdapter = nil
 		a.dockerConfig = nil
@@ -85,7 +88,8 @@ func (a *imageOpsAdapter) executeDockerCommand(command string) (string, error) {
 		return "", fmt.Errorf("Docker adapter not initialized but required for command execution")
 	}
 
-	return a.dockerAdapter.ExecuteCommand(command)
+	ctx := context.Background()
+	return a.dockerAdapter.ExecuteCommand(ctx, command)
 }
 
 // isDockerInitialized checks if Docker is properly initialized

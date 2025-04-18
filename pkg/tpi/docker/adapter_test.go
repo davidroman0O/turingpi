@@ -1,304 +1,137 @@
 package docker
 
 import (
+	"context"
 	"os"
-	"strings"
+	"path/filepath"
 	"testing"
-
-	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
 )
 
 func TestNewAdapter(t *testing.T) {
-	// Test directories - using temporary dirs for safety
-	sourceDir, err := os.MkdirTemp("", "turingpi-test-source-*")
-	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
-	}
-	defer os.RemoveAll(sourceDir)
+	// Create temporary directories for testing
+	sourceDir := t.TempDir()
+	tempDir := t.TempDir()
+	outputDir := t.TempDir()
 
-	tempDir, err := os.MkdirTemp("", "turingpi-test-temp-*")
+	// Test successful creation
+	ctx := context.Background()
+	adapter, err := NewAdapter(ctx, sourceDir, tempDir, outputDir)
 	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
+		t.Fatalf("Failed to create adapter: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer adapter.Close()
 
-	outputDir, err := os.MkdirTemp("", "turingpi-test-output-*")
-	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
-	}
-	defer os.RemoveAll(outputDir)
-
-	// Test creating a new adapter
-	adapter, err := NewAdapter(sourceDir, tempDir, outputDir)
-	if err != nil {
-		t.Fatal("Failed to create Docker adapter:", err)
-	}
-	if adapter == nil {
-		t.Fatal("Adapter is nil")
-	}
 	if adapter.Container == nil {
-		t.Fatal("Container is nil")
+		t.Error("Container is nil")
 	}
-
-	// Clean up after test
-	defer adapter.Cleanup()
-
-	// Validate container properties
-	if adapter.GetContainerID() == "" {
-		t.Error("Expected container ID to be non-empty")
-	}
-	if adapter.GetContainerName() == "" {
-		t.Error("Expected container name to be non-empty")
-	}
-}
-
-func TestNewAdapterWithConfig(t *testing.T) {
-	// Skip if Docker is not available
-	if !platform.DockerAvailable() {
-		t.Skip("Docker not available, skipping test")
-	}
-
-	// Create temporary directories for test
-	sourceDir, err := os.MkdirTemp("", "turingpi-test-source-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp source dir: %v", err)
-	}
-	defer os.RemoveAll(sourceDir)
-
-	tempDir, err := os.MkdirTemp("", "turingpi-test-temp-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	outputDir, err := os.MkdirTemp("", "turingpi-test-output-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp output dir: %v", err)
-	}
-	defer os.RemoveAll(outputDir)
-
-	// Create a custom config
-	config := &platform.DockerExecutionConfig{
-		DockerImage:            "alpine:latest",
-		SourceDir:              sourceDir,
-		TempDir:                tempDir,
-		OutputDir:              outputDir,
-		AdditionalMounts:       map[string]string{},
-		ContainerName:          "turingpi-test-container",
-		UseUniqueContainerName: true,
-	}
-
-	// Create an adapter with the custom config
-	adapter, err := NewAdapterWithConfig(config)
-	if err != nil {
-		t.Fatalf("Failed to create adapter with custom config: %v", err)
-	}
-	defer adapter.Cleanup()
-
-	// The container name should be different from the original name due to uniqueness
-	containerName := adapter.GetContainerName()
-	if !strings.Contains(containerName, "turingpi-test-container-") {
-		t.Errorf("Expected container name to contain 'turingpi-test-container-', got '%s'", containerName)
-	}
-
-	// Check that the container exists
-	if adapter.GetContainerID() == "" {
-		t.Error("Expected container ID to be non-empty")
+	if adapter.client == nil {
+		t.Error("Docker client is nil")
 	}
 }
 
 func TestAdapterExecuteCommand(t *testing.T) {
-	// Create test directories
-	tempDir, err := os.MkdirTemp("", "turingpi-test-*")
+	// Create temporary directories for testing
+	tempDir := t.TempDir()
+	ctx := context.Background()
+
+	// Create adapter
+	adapter, err := NewAdapter(ctx, tempDir, tempDir, tempDir)
 	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
+		t.Fatalf("Failed to create adapter: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer adapter.Close()
 
-	// Use Ubuntu for better command compatibility
-	config := platform.NewDefaultDockerConfig("", tempDir, "")
-	config.DockerImage = "ubuntu:22.04" // Use Ubuntu instead of Alpine
-	config.ContainerName = "turingpi-test-exec-container"
-
-	adapter, err := NewAdapterWithConfig(config)
+	// Test simple command execution
+	output, err := adapter.ExecuteCommand(ctx, "echo 'Hello Docker'")
 	if err != nil {
-		t.Fatal("Failed to create Docker adapter:", err)
+		t.Fatalf("Failed to execute command: %v", err)
 	}
-	defer adapter.Cleanup()
+	if output != "Hello Docker\n" {
+		t.Errorf("Unexpected output: %s", output)
+	}
 
-	// Test simple command with bash
-	output, err := adapter.ExecuteCommand("echo 'Hello Docker'")
+	// Test command with environment variable
+	output, err = adapter.ExecuteCommand(ctx, "export TEST_VAR='test value' && echo $TEST_VAR")
 	if err != nil {
-		t.Fatal("Failed to execute command:", err)
+		t.Fatalf("Failed to execute command with env var: %v", err)
 	}
-
-	// Trim output
-	output = strings.TrimSpace(output)
-	if !strings.Contains(output, "Hello Docker") {
-		t.Errorf("Expected output to contain 'Hello Docker', got: '%s'", output)
-	}
-
-	// Test command with environment variables
-	output, err = adapter.ExecuteCommand("export TEST_VAR='test value' && echo $TEST_VAR")
-	if err != nil {
-		t.Fatal("Failed to execute command with env var:", err)
-	}
-
-	output = strings.TrimSpace(output)
-	if !strings.Contains(output, "test value") {
-		t.Errorf("Expected output to contain 'test value', got: '%s'", output)
+	if output != "test value\n" {
+		t.Errorf("Unexpected output: %s", output)
 	}
 }
 
 func TestCopyFileToContainer(t *testing.T) {
+	// Create temporary directories for testing
+	tempDir := t.TempDir()
+	ctx := context.Background()
+
 	// Create a test file
-	tempDir, err := os.MkdirTemp("", "turingpi-test-*")
+	testContent := "test content"
+	testFilePath := filepath.Join(tempDir, "test.txt")
+	err := os.WriteFile(testFilePath, []byte(testContent), 0644)
 	if err != nil {
-		t.Fatal("Failed to create temp directory:", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	testFilePath := tempDir + "/test.txt"
-	testContent := "test content for Docker copy"
-	err = os.WriteFile(testFilePath, []byte(testContent), 0644)
-	if err != nil {
-		t.Fatal("Failed to write test file:", err)
+		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Create Docker adapter with Ubuntu instead of Alpine for better command support
-	config := platform.NewDefaultDockerConfig("", tempDir, "")
-	config.DockerImage = "ubuntu:22.04" // Use Ubuntu instead of Alpine
-	config.ContainerName = "turingpi-test-copy-container"
-
-	adapter, err := NewAdapterWithConfig(config)
+	// Create adapter
+	adapter, err := NewAdapter(ctx, tempDir, tempDir, tempDir)
 	if err != nil {
-		t.Fatal("Failed to create Docker adapter:", err)
+		t.Fatalf("Failed to create adapter: %v", err)
 	}
-	defer adapter.Cleanup()
+	defer adapter.Close()
 
-	// Copy the file to the container
+	// Test copying file to container
 	containerPath := "/tmp/test.txt"
-	err = adapter.CopyFileToContainer(testFilePath, containerPath)
+	err = adapter.CopyFileToContainer(ctx, testFilePath, containerPath)
 	if err != nil {
-		t.Fatal("Failed to copy file to container:", err)
+		t.Fatalf("Failed to copy file to container: %v", err)
 	}
 
-	// Verify the file exists and has correct content using bash
-	output, err := adapter.ExecuteCommand("bash -c 'cat /tmp/test.txt'")
+	// Verify file content in container
+	output, err := adapter.ExecuteCommand(ctx, "bash -c 'cat /tmp/test.txt'")
 	if err != nil {
-		t.Fatal("Failed to read file from container:", err)
+		t.Fatalf("Failed to read file in container: %v", err)
 	}
-
-	// Trim any whitespace and newlines from the output
-	output = strings.TrimSpace(output)
 	if output != testContent {
-		t.Errorf("Expected file content to be '%s', got '%s'", testContent, output)
+		t.Errorf("Unexpected file content in container: %s", output)
 	}
 }
 
-func TestDockerAdapter_Lifecycle(t *testing.T) {
-	// Skip if Docker is not available
-	if !platform.DockerAvailable() {
-		t.Skip("Docker not available, skipping test")
-	}
+func TestCleanup(t *testing.T) {
+	// Create temporary directories for testing
+	tempDir := t.TempDir()
+	ctx := context.Background()
 
-	// Create a temporary directory for the test
-	tempDir, err := os.MkdirTemp("", "turingpi-docker-adapter-test-*")
+	// Create adapter
+	adapter, err := NewAdapter(ctx, tempDir, tempDir, tempDir)
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf("Failed to create adapter: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
 
-	// Create a basic adapter
-	adapter, err := NewAdapter(tempDir, tempDir, tempDir)
+	// Test container is working
+	output, err := adapter.ExecuteCommand(ctx, "echo 'Hello from adapter test'")
 	if err != nil {
-		t.Fatalf("Failed to create Docker adapter: %v", err)
+		t.Fatalf("Failed to execute command: %v", err)
+	}
+	if output != "Hello from adapter test\n" {
+		t.Errorf("Unexpected output: %s", output)
 	}
 
-	// Verify it was created correctly
-	if adapter.Container == nil {
-		t.Fatal("Adapter Container field is nil")
-	}
-	if adapter.GetContainerName() == "" {
-		t.Fatal("Container name is empty")
-	}
-	if adapter.GetContainerID() == "" {
-		t.Fatal("Container ID is empty")
+	// Test cleanup
+	if err := adapter.Cleanup(ctx); err != nil {
+		t.Fatalf("Failed to cleanup: %v", err)
 	}
 
-	// Test basic command execution
-	output, err := adapter.ExecuteCommand("echo 'Hello from adapter test'")
-	if err != nil {
-		t.Errorf("Failed to execute command: %v", err)
-	} else {
-		t.Logf("Command output: %s", output)
-	}
-
-	// Test proper cleanup
-	err = adapter.Close()
-	if err != nil {
-		t.Errorf("Failed to close adapter: %v", err)
-	}
-
-	// Verify container was properly nullified
-	if adapter.Container != nil {
-		t.Error("Container was not set to nil after Close()")
-	}
-
-	// Verify operations after close fail gracefully
-	_, err = adapter.ExecuteCommand("echo 'This should fail'")
+	// Verify container is stopped
+	_, err = adapter.ExecuteCommand(ctx, "echo 'This should fail'")
 	if err == nil {
-		t.Error("Execute after Close() did not return an error")
-	} else {
-		t.Logf("Expected error after close: %v", err)
+		t.Error("Expected error after cleanup, got none")
 	}
 
-	// Test Cleanup convenience method
-	adapter, err = NewAdapter(tempDir, tempDir, tempDir)
+	// Test creating new adapter after cleanup
+	adapter, err = NewAdapter(ctx, tempDir, tempDir, tempDir)
 	if err != nil {
-		t.Fatalf("Failed to create Docker adapter for second test: %v", err)
+		t.Fatalf("Failed to create new adapter after cleanup: %v", err)
 	}
-
-	// Store container ID for verification
-	containerID := adapter.GetContainerID()
-	if containerID == "" {
-		t.Fatal("Container ID is empty in second test")
-	}
-
-	// Call Cleanup method
-	adapter.Cleanup()
-
-	// Verify the container is gone
-	if adapter.Container != nil {
-		t.Error("Container was not set to nil after Cleanup()")
-	}
-}
-
-func TestDockerAdapter_WithConfig(t *testing.T) {
-	// Skip if Docker is not available
-	if !platform.DockerAvailable() {
-		t.Skip("Docker not available, skipping test")
-	}
-
-	// Create a configuration with unique container naming
-	config := platform.NewDefaultDockerConfig("", "", "")
-	config.UseUniqueContainerName = true
-
-	// Create adapter with custom config
-	adapter, err := NewAdapterWithConfig(config)
-	if err != nil {
-		t.Fatalf("Failed to create adapter with config: %v", err)
-	}
-	defer adapter.Cleanup() // Ensure cleanup happens
-
-	// Verify the container exists
-	if adapter.Container == nil {
-		t.Fatal("Container is nil despite successful creation")
-	}
-
-	// Verify it received a unique name (original + suffix)
-	containerName := adapter.GetContainerName()
-	if !strings.Contains(containerName, "-") {
-		t.Errorf("Expected container name to have a unique suffix with hyphen, got: %s", containerName)
-	}
+	defer adapter.Close()
 }

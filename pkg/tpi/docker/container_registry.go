@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"runtime"
+
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 )
@@ -44,7 +46,38 @@ func GetRegistry() *ContainerRegistry {
 		}
 
 		// Initialize Docker client for cleanup
-		cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		var cli *client.Client
+		var err error
+
+		// Get the Docker context details first
+		contextInfo, contextErr := getDockerContextDetails()
+		if contextErr == nil && contextInfo.Host != "" {
+			fmt.Printf("Registry: Using Docker host from context: %s\n", contextInfo.Host)
+
+			// Try to create client with explicit context host
+			cli, err = client.NewClientWithOpts(
+				client.FromEnv,
+				client.WithAPIVersionNegotiation(),
+				client.WithHost(contextInfo.Host),
+			)
+
+			if err != nil {
+				fmt.Printf("Registry: Failed to connect with context host, falling back: %v\n", err)
+			}
+		}
+
+		// If context approach didn't work, try default options
+		if cli == nil {
+			// Check if DOCKER_HOST is explicitly set
+			dockerHost := os.Getenv("DOCKER_HOST")
+			if dockerHost != "" {
+				fmt.Printf("Registry: Using DOCKER_HOST from environment: %s\n", dockerHost)
+			}
+
+			// Try with default environment settings
+			cli, err = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		}
+
 		if err != nil {
 			fmt.Printf("Warning: Failed to initialize Docker client for registry: %v\n", err)
 		} else {
@@ -53,6 +86,16 @@ func GetRegistry() *ContainerRegistry {
 
 		// Set up signal handlers
 		globalRegistry.setupSignalHandlers()
+
+		// Set up finalizer to ensure client is closed
+		runtime.SetFinalizer(globalRegistry, func(r *ContainerRegistry) {
+			if r.dockerClient != nil {
+				r.dockerClient.Close()
+			}
+			if r.cancel != nil {
+				r.cancel()
+			}
+		})
 	})
 	return globalRegistry
 }
@@ -91,6 +134,12 @@ func (r *ContainerRegistry) setupSignalHandlers() {
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("Registry: Recovered from panic in signal handler: %v\n", r)
+			}
+		}()
+
 		sig := <-c
 		fmt.Printf("Registry: Received signal %v, cleaning up containers...\n", sig)
 		r.CleanupAll()
@@ -99,17 +148,66 @@ func (r *ContainerRegistry) setupSignalHandlers() {
 		signal.Stop(c)
 		syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 	}()
+}
 
-	// Also set up a panic handler for defer
-	if r.cleanupHandler != nil {
-		defer r.cleanupHandler()
+// cleanupContainer handles the cleanup of a single container with its own timeout context
+func (r *ContainerRegistry) cleanupContainer(containerID string) error {
+	// Create a timeout context specifically for this container
+	ctx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
+	defer cancel()
+
+	fmt.Printf("Registry: Stopping container %s...\n", containerID)
+
+	// Try SDK method first
+	if r.dockerClient != nil {
+		// Try to stop container with timeout
+		stopTimeout := 5 // seconds
+		err := r.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &stopTimeout})
+		if err != nil {
+			fmt.Printf("Registry: Error stopping container %s via SDK: %v (will try force remove)\n", containerID, err)
+			// Continue to removal attempt even if stop fails
+		}
+
+		// Force remove the container using SDK
+		fmt.Printf("Registry: Removing container %s via SDK...\n", containerID)
+		err = r.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+		if err != nil {
+			fmt.Printf("Registry: Error removing container %s via SDK: %v (will try CLI fallback)\n", containerID, err)
+		} else {
+			fmt.Printf("Registry: Successfully removed container %s via SDK\n", containerID)
+			// Verify container is actually gone
+			if r.verifyContainerRemoved(containerID) {
+				return nil // Container confirmed removed
+			}
+			fmt.Printf("Registry: Container %s still exists after SDK removal, trying CLI fallback\n", containerID)
+		}
 	}
+
+	// Fallback to CLI if SDK failed or we don't have a client
+	fmt.Printf("Registry: Attempting to remove container %s via CLI...\n", containerID)
+	cmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to remove container via CLI: %v, output: %s", err, string(output))
+	}
+
+	fmt.Printf("Registry: Successfully removed container %s via CLI\n", containerID)
+	return nil
 }
 
 // CleanupAll removes all tracked containers
 func (r *ContainerRegistry) CleanupAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Registry: Recovered from panic during cleanup: %v\n", r)
+		}
+		// Always run cleanup handler, even if there's a panic
+		if r.cleanupHandler != nil {
+			r.cleanupHandler()
+		}
+	}()
 
 	if len(r.containers) == 0 {
 		return
@@ -117,81 +215,30 @@ func (r *ContainerRegistry) CleanupAll() {
 
 	fmt.Printf("Registry: Cleaning up %d containers...\n", len(r.containers))
 
-	// Make a copy of the container IDs so we can iterate over them safely
-	// while potentially modifying the map
+	// Make a copy of the container IDs
 	containerIDs := make([]string, 0, len(r.containers))
 	for containerID := range r.containers {
 		containerIDs = append(containerIDs, containerID)
 	}
 
-	// Create a timeout context for cleanup
-	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
-	defer cancel()
-
+	// Clean up each container
 	for _, containerID := range containerIDs {
-		fmt.Printf("Registry: Stopping container %s...\n", containerID)
-
-		// Try SDK method first
-		if r.dockerClient != nil {
-			// Try to stop container with timeout
-			stopTimeout := 5 // seconds
-			err := r.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &stopTimeout})
-			if err != nil {
-				fmt.Printf("Registry: Error stopping container %s via SDK: %v (will try force remove)\n", containerID, err)
-				// Continue to removal attempt even if stop fails
-			}
-
-			// Force remove the container using SDK
-			fmt.Printf("Registry: Removing container %s via SDK...\n", containerID)
-			err = r.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
-			if err != nil {
-				fmt.Printf("Registry: Error removing container %s via SDK: %v (will try CLI fallback)\n", containerID, err)
-				// SDK failed, continue to CLI fallback
-			} else {
-				fmt.Printf("Registry: Successfully removed container %s via SDK\n", containerID)
-				delete(r.containers, containerID)
-				// Verify container is actually gone
-				if r.verifyContainerRemoved(containerID) {
-					continue // Container confirmed removed, skip CLI fallback
-				}
-				fmt.Printf("Registry: Container %s still exists after SDK removal, trying CLI fallback\n", containerID)
-			}
-		}
-
-		// Fallback to CLI if SDK failed or we don't have a client
-		fmt.Printf("Registry: Attempting to remove container %s via CLI...\n", containerID)
-		cmd := exec.Command("docker", "rm", "-f", containerID)
-		output, err := cmd.CombinedOutput()
+		err := r.cleanupContainer(containerID)
 		if err != nil {
-			fmt.Printf("Registry: Error removing container %s via CLI: %v, output: %s\n",
-				containerID, err, string(output))
-		} else {
-			fmt.Printf("Registry: Successfully removed container %s via CLI\n", containerID)
+			fmt.Printf("Registry: Warning: Failed to clean up container %s: %v\n", containerID, err)
 		}
-
-		// Final verification
-		if r.verifyContainerRemoved(containerID) {
-			fmt.Printf("Registry: Confirmed container %s is removed\n", containerID)
-		} else {
-			fmt.Printf("Registry: Warning: Container %s may still exist after cleanup attempts\n", containerID)
-		}
-
-		// Remove from our tracking map regardless of removal success
 		delete(r.containers, containerID)
-	}
-
-	// Call the cleanup handler if set
-	if r.cleanupHandler != nil {
-		r.cleanupHandler()
 	}
 }
 
 // verifyContainerRemoved checks if a container has been properly removed
-// Returns true if the container is confirmed to be removed
 func (r *ContainerRegistry) verifyContainerRemoved(containerID string) bool {
+	ctx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
+	defer cancel()
+
 	// First try using the SDK if available
 	if r.dockerClient != nil {
-		_, err := r.dockerClient.ContainerInspect(r.ctx, containerID)
+		_, err := r.dockerClient.ContainerInspect(ctx, containerID)
 		if client.IsErrNotFound(err) {
 			// Container confirmed not found
 			return true
@@ -199,7 +246,7 @@ func (r *ContainerRegistry) verifyContainerRemoved(containerID string) bool {
 	}
 
 	// Fallback to CLI
-	cmd := exec.Command("docker", "ps", "-a", "--filter", "id="+containerID, "--format", "{{.ID}}")
+	cmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", "id="+containerID, "--format", "{{.ID}}")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// If cli command fails, we can't verify - assume not removed to be safe
@@ -216,4 +263,29 @@ func (r *ContainerRegistry) GetContainerCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.containers)
+}
+
+// Close cleans up the registry resources
+func (r *ContainerRegistry) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Clean up all containers first
+	r.CleanupAll()
+
+	// Close the Docker client
+	if r.dockerClient != nil {
+		if err := r.dockerClient.Close(); err != nil {
+			return fmt.Errorf("failed to close Docker client: %w", err)
+		}
+		r.dockerClient = nil
+	}
+
+	// Cancel the context
+	if r.cancel != nil {
+		r.cancel()
+		r.cancel = nil
+	}
+
+	return nil
 }
