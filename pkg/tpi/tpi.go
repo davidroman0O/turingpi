@@ -201,6 +201,18 @@ func (tpi *TuringPiExecutor) Run(workflowTemplate func(ctx Context, cluster Clus
 			nodeDetails.ID, nodeDetails.IPAddress, nodeDetails.Hostname,
 			nodeCfg.Board, nodeDetails.Gateway)
 
+		// Initialize node state with basic information
+		properties := map[string]interface{}{
+			"NodeID":    nodeID,
+			"BoardType": nodeCfg.Board,
+			"IPAddress": ipAddress,
+			"Hostname":  hostname,
+		}
+		if err := tpi.stateManager.UpdateNodeProperties(nodeID, properties); err != nil {
+			log.Printf("Warning: Failed to initialize node state: %v", err)
+			// Continue despite this error
+		}
+
 		// 3. Create Execution Context using our new constructor
 		tpiCtx := NewContext(execCtx)
 

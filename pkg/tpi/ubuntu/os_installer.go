@@ -154,6 +154,8 @@ func (b *UbuntuOSInstallerBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) err
 		"LastOperation":     fmt.Sprintf("Complete%s", phaseName),
 		"LastOperationTime": time.Now(),
 		"LastInstallTime":   time.Now(),
+		"OSType":            "ubuntu", // Set OS type
+		"OSVersion":         "22.04",  // Default version - could be made configurable
 		"LastError":         "",
 	}
 	if err := stateManager.UpdateNodeProperties(state.NodeID(b.nodeID), properties); err != nil {
