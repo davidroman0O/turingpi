@@ -10,6 +10,7 @@ import (
 
 	"github.com/davidroman0O/turingpi/pkg/tpi"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
+	"github.com/davidroman0O/turingpi/pkg/tpi/state"
 	"github.com/davidroman0O/turingpi/pkg/tpi/ubuntu"
 )
 
@@ -38,7 +39,7 @@ func main() {
 		PrepImageDir: "/Users/davidroman/Documents/code/github/turingpi/tmp-image-prep", // Temporary directory for image processing
 		Node1: &tpi.NodeConfig{
 			IP:    "192.168.1.101/24", // Target static IP for the node (including CIDR)
-			Board: tpi.RK1,            // Node 1 is RK1
+			Board: state.RK1,          // Node 1 is RK1
 		},
 		// Add Node2, Node3, Node4 configs if needed
 	}

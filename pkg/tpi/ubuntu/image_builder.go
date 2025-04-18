@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi" // Base tpi types
 	"github.com/davidroman0O/turingpi/pkg/tpi/imageops"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform" // Platform detection
+	"github.com/davidroman0O/turingpi/pkg/tpi/state"
 )
 
 // UbuntuImageBuilder defines the configuration for Phase 1: Image Customization for Ubuntu.
@@ -144,37 +146,47 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	log.Printf("Calculated input hash: %s", inputHash)
 
 	// --- Check State ---
-	stateMgr := cluster.GetStateManager()
-	currentState := stateMgr.GetNodeState(b.nodeID).ImageCustomization
+	stateManager := cluster.GetStateManager()
 
-	if currentState.Status == tpi.StatusCompleted &&
-		currentState.InputHash == inputHash &&
-		currentState.OutputImagePath != "" {
-		// If completed with the same inputs and we have the output path
-		log.Printf("Phase 1 already completed with matching inputs. Using cached image: %s",
-			currentState.OutputImagePath)
+	// Check if this phase was already completed with the same hash
+	nodeState, err := stateManager.GetNodeState(state.NodeID(b.nodeID))
+	if err == nil && nodeState != nil {
+		// Check if this phase was already completed with the same hash
+		if !nodeState.LastImageTime.IsZero() &&
+			nodeState.LastImageHash == inputHash &&
+			nodeState.LastError == "" &&
+			nodeState.LastImagePath != "" {
 
-		// Check if the cached output actually exists
-		if _, err := os.Stat(currentState.OutputImagePath); err == nil {
-			// Return the cached result
-			return &tpi.ImageResult{
-				ImagePath: currentState.OutputImagePath,
-				Board:     nodeConfig.Board,
-				InputHash: inputHash,
-			}, nil
-		} else {
-			log.Printf("Warning: Cached image file %s not found, will rebuild",
-				currentState.OutputImagePath)
+			// Check if the cached output actually exists
+			if _, err := os.Stat(nodeState.LastImagePath); err == nil {
+				log.Printf("Phase 1 already completed with matching inputs. Using cached image: %s",
+					nodeState.LastImagePath)
+
+				// Return the cached result
+				return &tpi.ImageResult{
+					ImagePath: nodeState.LastImagePath,
+					Board:     nodeConfig.Board,
+					InputHash: inputHash,
+				}, nil
+			} else {
+				log.Printf("Warning: Cached image file %s not found, will rebuild",
+					nodeState.LastImagePath)
+			}
+		}
+
+		// Check if already running
+		if nodeState.LastOperation == fmt.Sprintf("Start%s", phaseName) {
+			// This is an approximation - in a real solution we'd have better phase tracking
+			return nil, fmt.Errorf("phase 1 appears to be already running for node %d. Manual intervention might be required", b.nodeID)
 		}
 	}
 
-	if currentState.Status == tpi.StatusRunning {
-		return nil, fmt.Errorf("phase 1 is already marked as running for node %d (state timestamp: %s). Manual intervention might be required", b.nodeID, currentState.Timestamp)
+	// Mark as running
+	properties := map[string]interface{}{
+		"LastOperation":     fmt.Sprintf("Start%s", phaseName),
+		"LastOperationTime": time.Now(),
 	}
-
-	// --- Mark State as Running ---
-	err = stateMgr.UpdatePhaseState(b.nodeID, phaseName, tpi.StatusRunning, inputHash, "", nil)
-	if err != nil {
+	if err := stateManager.UpdateNodeProperties(state.NodeID(b.nodeID), properties); err != nil {
 		return nil, fmt.Errorf("failed to update state to running: %w", err)
 	}
 
@@ -351,9 +363,16 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	}
 
 	// --- Update State to Completed ---
-	err = stateMgr.UpdatePhaseState(b.nodeID, phaseName, tpi.StatusCompleted, inputHash, finalImagePath, nil)
-	if err != nil {
-		log.Printf("Warning: Failed to update state to completed, but phase finished successfully: %v", err)
+	properties = map[string]interface{}{
+		"LastOperation":     fmt.Sprintf("Complete%s", phaseName),
+		"LastOperationTime": time.Now(),
+		"LastImagePath":     finalImagePath,
+		"LastImageHash":     inputHash,
+		"LastImageTime":     time.Now(),
+		"LastError":         "",
+	}
+	if err := stateManager.UpdateNodeProperties(state.NodeID(b.nodeID), properties); err != nil {
+		log.Printf("Warning: Failed to update state after completion: %v", err)
 	}
 
 	log.Printf("--- Phase 1: %s for Node %d Completed Successfully ---", phaseName, b.nodeID)
@@ -366,11 +385,20 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	}, nil
 }
 
-// failPhase is a helper to update state on failure and return the error.
+// failPhase updates the state and returns the error
 func (b *UbuntuImageBuilder) failPhase(cluster tpi.Cluster, err error) (*tpi.ImageResult, error) {
 	phaseName := "ImageCustomization"
-	log.Printf("--- Error in Phase 1: %s for Node %d ---", phaseName, b.nodeID)
-	log.Printf("Error details: %v", err)
-	_ = cluster.GetStateManager().UpdatePhaseState(b.nodeID, phaseName, tpi.StatusFailed, "", "", err)
+	log.Printf("Phase %s failed: %v", phaseName, err)
+
+	stateManager := cluster.GetStateManager()
+	properties := map[string]interface{}{
+		"LastOperation":     fmt.Sprintf("Failed%s", phaseName),
+		"LastOperationTime": time.Now(),
+		"LastError":         err.Error(),
+	}
+	if updateErr := stateManager.UpdateNodeProperties(state.NodeID(b.nodeID), properties); updateErr != nil {
+		log.Printf("Warning: Failed to update state after failure: %v", updateErr)
+	}
+
 	return nil, err
 }

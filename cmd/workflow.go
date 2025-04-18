@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi"
+	"github.com/davidroman0O/turingpi/pkg/tpi/state"
 	"github.com/davidroman0O/turingpi/pkg/tpi/ubuntu"
 	"github.com/spf13/cobra"
 )
@@ -105,7 +106,7 @@ node setup process. Make sure to provide all required parameters.`,
 		// Prepare node config
 		nodeConfig := &tpi.NodeConfig{
 			IP:    ipCIDR,
-			Board: tpi.RK1, // Assuming RK1 for now, could make this configurable
+			Board: state.RK1, // Use state.RK1 directly from the state package
 		}
 
 		// Prepare TPI config based on command line flags

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi" // Base tpi types
+	"github.com/davidroman0O/turingpi/pkg/tpi/state"
 )
 
 // localRuntimeImpl implements the tpi.LocalRuntime interface
@@ -104,24 +105,31 @@ func (b *UbuntuPostInstallerBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) e
 		return fmt.Errorf("internal error: node config not found for Node %d", b.nodeID)
 	}
 
-	// --- Calculate Input Hash (or skip) ---
-	inputHash, _ := b.calculateInputHash() // Ignore error for now
-
 	// --- Check State ---
-	stateMgr := cluster.GetStateManager()
-	currentState := stateMgr.GetNodeState(b.nodeID).PostInstallation
+	stateManager := cluster.GetStateManager()
 
-	if currentState.Status == tpi.StatusCompleted /* && currentState.InputHash == inputHash */ {
-		log.Printf("Phase 3 already completed. Skipping execution.")
-		return nil
-	}
-	if currentState.Status == tpi.StatusRunning {
-		return fmt.Errorf("phase 3 is already marked as running for node %d (state timestamp: %s). Manual intervention might be required", b.nodeID, currentState.Timestamp)
+	nodeState, err := stateManager.GetNodeState(state.NodeID(b.nodeID))
+	if err == nil && nodeState != nil {
+		// Check if this phase was already completed with the same hash
+		if !nodeState.LastConfigTime.IsZero() &&
+			nodeState.LastError == "" {
+			log.Printf("Phase 3 already completed. Skipping execution.")
+			return nil
+		}
+
+		// Check if already running
+		if nodeState.LastOperation == fmt.Sprintf("Start%s", phaseName) {
+			// This is an approximation - in a real solution we'd have better phase tracking
+			return fmt.Errorf("phase 3 appears to be already running for node %d. Manual intervention might be required", b.nodeID)
+		}
 	}
 
-	// --- Mark State as Running ---
-	err := stateMgr.UpdatePhaseState(b.nodeID, phaseName, tpi.StatusRunning, inputHash, "", nil)
-	if err != nil {
+	// Mark as running
+	properties := map[string]interface{}{
+		"LastOperation":     fmt.Sprintf("Start%s", phaseName),
+		"LastOperationTime": time.Now(),
+	}
+	if err := stateManager.UpdateNodeProperties(state.NodeID(b.nodeID), properties); err != nil {
 		return fmt.Errorf("failed to update state to running: %w", err)
 	}
 
@@ -150,8 +158,14 @@ func (b *UbuntuPostInstallerBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) e
 		return b.failPhase(cluster, actionsErr)
 	}
 
-	err = stateMgr.UpdatePhaseState(b.nodeID, phaseName, tpi.StatusCompleted, inputHash, "", nil)
-	if err != nil {
+	// Update completion state
+	properties = map[string]interface{}{
+		"LastOperation":     fmt.Sprintf("Complete%s", phaseName),
+		"LastOperationTime": time.Now(),
+		"LastConfigTime":    time.Now(),
+		"LastError":         "",
+	}
+	if err := stateManager.UpdateNodeProperties(state.NodeID(b.nodeID), properties); err != nil {
 		log.Printf("Warning: Failed to update state to completed, but phase finished: %v", err)
 	}
 
@@ -159,11 +173,20 @@ func (b *UbuntuPostInstallerBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) e
 	return nil
 }
 
-// failPhase is a helper to update state on failure and return the error.
+// failPhase updates the state and returns the error
 func (b *UbuntuPostInstallerBuilder) failPhase(cluster tpi.Cluster, err error) error {
 	phaseName := "PostInstallation"
-	log.Printf("--- Error in Phase 3: %s for Node %d ---", phaseName, b.nodeID)
-	log.Printf("Error details: %v", err)
-	_ = cluster.GetStateManager().UpdatePhaseState(b.nodeID, phaseName, tpi.StatusFailed, "", "", err)
+	log.Printf("Phase %s failed: %v", phaseName, err)
+
+	stateManager := cluster.GetStateManager()
+	properties := map[string]interface{}{
+		"LastOperation":     fmt.Sprintf("Failed%s", phaseName),
+		"LastOperationTime": time.Now(),
+		"LastError":         err.Error(),
+	}
+	if updateErr := stateManager.UpdateNodeProperties(state.NodeID(b.nodeID), properties); updateErr != nil {
+		log.Printf("Warning: Failed to update state after failure: %v", updateErr)
+	}
+
 	return err
 }

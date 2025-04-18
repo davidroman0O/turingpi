@@ -6,29 +6,24 @@ import (
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/bmc"
+	"github.com/davidroman0O/turingpi/pkg/tpi/state"
 )
 
-// NodeID represents the numeric identifier for a compute node slot.
-// Using an underlying int allows for easy iteration if needed, while providing type safety.
-type NodeID int
+// Import NodeID and BoardType from state package
+type NodeID = state.NodeID
+type BoardType = state.BoardType
 
-// Enum definitions for the compute node slots.
+// Node ID constants - defined here for backward compatibility
+// For new code, prefer to import these directly from the state package
 const (
 	Node1 NodeID = 1
 	Node2 NodeID = 2
 	Node3 NodeID = 3
 	Node4 NodeID = 4
-)
 
-// BoardType identifies the type of compute module (e.g., RK1, CM4).
-type BoardType string
-
-const (
-	// RK1 represents the Radxa RK3588 based compute module.
-	RK1 BoardType = "rk1"
-	// CM4 represents the Raspberry Pi Compute Module 4.
-	CM4 BoardType = "cm4"
-	// TODO: Add other board types as needed.
+	// NOTE: Board type constants (RK1, CM4) should be imported directly from state package:
+	// import "github.com/davidroman0O/turingpi/pkg/tpi/state"
+	// state.RK1, state.CM4
 )
 
 // TPIConfig holds the overall configuration for the Turing Pi cluster
@@ -107,7 +102,7 @@ type Cluster interface {
 	GetNodeConfig(nodeID NodeID) *NodeConfig
 
 	// GetStateManager returns the state manager instance
-	GetStateManager() *stateManager
+	GetStateManager() state.Manager
 
 	// GetCacheDir returns the cache directory path
 	GetCacheDir() string

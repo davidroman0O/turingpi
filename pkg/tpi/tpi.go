@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/bmc" // Import from new location
+	"github.com/davidroman0O/turingpi/pkg/tpi/state"
 )
 
 // TuringPiExecutor holds the processed configuration and runtime state
@@ -18,7 +19,7 @@ import (
 type TuringPiExecutor struct {
 	config        TPIConfig     // The validated and defaulted configuration
 	stateFilePath string        // Absolute path to the state file
-	stateManager  *stateManager // Pointer to the state manager instance
+	stateManager  state.Manager // Direct use of the state package manager
 	// bmcClient     *bmc.Client   // Client for interacting with the BMC (Removed as bmc pkg is functional)
 	// TODO: Add credential manager etc.
 }
@@ -109,8 +110,8 @@ func NewTuringPi(config TPIConfig) (*TuringPiExecutor, error) {
 
 	// --- Initialize Internal Components --- //
 
-	// Initialize State Manager
-	stateMgr, err := newStateManager(stateFilePath)
+	// Initialize State Manager - directly use the state package
+	stateMgr, err := state.NewFileStateManager(stateFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize state manager: %w", err)
 	}
@@ -239,7 +240,7 @@ func (e *TuringPiExecutor) GetNodeConfig(nodeID NodeID) *NodeConfig {
 }
 
 // GetStateManager returns the state manager instance.
-func (e *TuringPiExecutor) GetStateManager() *stateManager {
+func (e *TuringPiExecutor) GetStateManager() state.Manager {
 	return e.stateManager
 }
 
