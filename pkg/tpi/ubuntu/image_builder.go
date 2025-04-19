@@ -129,7 +129,7 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	b.stagedOperations = []ops.Operation{} // Reset operations before collection
 
 	// Create a fresh image modifier for the pre-install callback
-	imageModifier := tpi.NewImageModifierImpl()
+	imageModifier := imageops.NewImageModifier()
 
 	// If preInstallFunc was provided, call it
 	if b.preInstallFunc != nil {
