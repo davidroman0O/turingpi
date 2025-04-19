@@ -17,6 +17,12 @@ import (
 func main() {
 	log.Println("--- Starting TPI Playground - Complete Workflow Example ---")
 
+	// Get absolute path for our working directory
+	workDir, err := os.Getwd()
+	if err != nil {
+		log.Fatalf("Failed to get working directory: %v", err)
+	}
+
 	// Check if we're running on a non-Linux platform
 	if !platform.IsLinux() {
 		// Check if Docker is available for image operations
@@ -32,11 +38,11 @@ func main() {
 	// --- Configuration ---
 	// Using real Turing Pi BMC details!
 	cfg := tpi.TPIConfig{
-		IP:           "192.168.1.90",                                                    // Real Turing Pi BMC IP
-		BMCUser:      "root",                                                            // Default BMC username
-		BMCPassword:  "turing",                                                          // Default BMC password
-		CacheDir:     "./.tpi_cache_playground",                                         // Use a local cache for the example
-		PrepImageDir: "/Users/davidroman/Documents/code/github/turingpi/tmp-image-prep", // Temporary directory for image processing
+		IP:           "192.168.1.90",                                  // Real Turing Pi BMC IP
+		BMCUser:      "root",                                          // Default BMC username
+		BMCPassword:  "turing",                                        // Default BMC password
+		CacheDir:     filepath.Join(workDir, ".tpi_cache_playground"), // Use a local cache for the example
+		PrepImageDir: filepath.Join(workDir, "tmp-image-prep"),        // Temporary directory for image processing
 		Node1: &tpi.NodeConfig{
 			IP:    "192.168.1.101/24", // Target static IP for the node (including CIDR)
 			Board: state.RK1,          // Node 1 is RK1
@@ -73,7 +79,7 @@ func main() {
 		// Define where final prepared images will be stored
 		// This is NOT the temporary processing directory (PrepImageDir)
 		// This is where the final customized images are placed
-		preparedImageDir := "/Users/davidroman/Documents/code/github/turingpi/prepared-images"
+		preparedImageDir := filepath.Join(workDir, "prepared-images")
 
 		// Ensure the prepared images directory exists
 		err = os.MkdirAll(preparedImageDir, 0755)
@@ -199,23 +205,25 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("phase 3 (Post-Install) failed: %w", err)
 		}
-		log.Printf("Phase 3 completed: Node %d configured successfully", node.ID)
+		log.Printf("Phase 3 completed: Post-installation configuration done on node %d", node.ID)
 
-		log.Printf("Complete workflow finished successfully for Node %d", node.ID)
 		return nil
 	}
 
-	// --- Get Node Execution Function ---
-	// The Run method prepares the execution function based on the template.
+	// --- Execute Workflow ---
+	// Create a context with timeout for the entire workflow
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	// Get the execution function for the workflow
 	executeNodeWorkflow := executor.Run(workflowTemplate)
 
-	// --- Execute for Node 1 ---
-	log.Println("Executing workflow specifically for Node 1...")
-	err = executeNodeWorkflow(context.Background(), tpi.Node1)
+	// Run the workflow for Node 1
+	err = executeNodeWorkflow(ctx, tpi.Node1)
 	if err != nil {
-		log.Fatalf("Failed to execute workflow for Node 1: %v", err)
+		log.Fatalf("Workflow failed: %v", err)
 		os.Exit(1)
 	}
 
-	log.Println("--- TPI Playground - Complete Workflow Example Finished Successfully ---")
+	log.Println("--- TPI Playground Workflow Completed Successfully ---")
 }

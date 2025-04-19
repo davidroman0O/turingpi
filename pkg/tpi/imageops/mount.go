@@ -36,7 +36,7 @@ func (a *imageOpsAdapter) MapPartitions(imgPathAbs string) (string, error) {
 			// Copy image to container
 			copyCmd := exec.Command("docker", "cp",
 				imgPathAbs,
-				fmt.Sprintf("%s:%s", a.dockerAdapter.GetContainerName(), containerImgPath))
+				fmt.Sprintf("%s:%s", a.dockerAdapter.Container.ContainerID, containerImgPath))
 
 			copyOutput, err := runCommand(copyCmd)
 			if err != nil {
@@ -48,8 +48,30 @@ func (a *imageOpsAdapter) MapPartitions(imgPathAbs string) (string, error) {
 			fmt.Printf("DEBUG: Image already exists in container: %s\n", checkOutput)
 		}
 
-		// Execute kpartx in Docker
-		dockerCmd := fmt.Sprintf("kpartx -av %s", containerImgPath)
+		// Debug: Check if we have necessary tools and permissions
+		debugCmds := []string{
+			"id",                               // Check current user
+			"ls -la /dev/loop*",                // Check loop devices
+			"ls -la /dev/mapper",               // Check device mapper
+			"sudo losetup -a",                  // Check existing loop devices
+			"lsmod | grep loop",                // Check if loop module is loaded
+			"sudo modprobe loop",               // Try to load loop module
+			"sudo losetup -f",                  // Find first available loop device
+			"file " + containerImgPath,         // Check file type
+			"sudo file -s " + containerImgPath, // Check filesystem type
+		}
+
+		for _, cmd := range debugCmds {
+			fmt.Printf("DEBUG: Running: %s\n", cmd)
+			output, err := a.executeDockerCommand(cmd)
+			fmt.Printf("DEBUG: Output: %s\n", output)
+			if err != nil {
+				fmt.Printf("DEBUG: Error: %v\n", err)
+			}
+		}
+
+		// Execute kpartx in Docker with sudo
+		dockerCmd := fmt.Sprintf("sudo kpartx -av %s", containerImgPath)
 		fmt.Printf("DEBUG: Running in container: %s\n", dockerCmd)
 
 		output, err := a.executeDockerCommand(dockerCmd)
@@ -59,49 +81,34 @@ func (a *imageOpsAdapter) MapPartitions(imgPathAbs string) (string, error) {
 
 		fmt.Printf("DEBUG: kpartx output: %s\n", output)
 
-		// Parse output using the same helper as native Linux approach for consistency
-		rootDevice, err := internalParseKpartxOutput(output)
+		// Parse kpartx output to get the root partition device
+		rootPartition, err := internalParseKpartxOutput(output)
 		if err != nil {
 			return "", fmt.Errorf("failed to parse Docker kpartx output: %w", err)
 		}
 
-		rootDevPath := fmt.Sprintf("/dev/mapper/%s", rootDevice)
-		fmt.Printf("Docker mapped root partition: %s\n", rootDevPath)
-
-		// Check if the device was actually created
-		checkDevCmd := fmt.Sprintf("ls -la %s", rootDevPath)
-		checkDevOutput, err := a.executeDockerCommand(checkDevCmd)
-		if err != nil {
-			return "", fmt.Errorf("mapped device not found in container: %s", rootDevPath)
-		}
-		fmt.Printf("DEBUG: Device exists: %s\n", checkDevOutput)
-
-		return rootDevPath, nil
+		// Return the full path to the root partition device
+		return fmt.Sprintf("/dev/mapper/%s", rootPartition), nil
 	}
 
 	// Native Linux approach
 	cmd := exec.Command("kpartx", "-av", imgPathAbs)
 	output, err := runCommand(cmd)
 	if err != nil {
-		return "", fmt.Errorf("kpartx failed: %w", err)
+		return "", fmt.Errorf("failed to map partitions: %w", err)
 	}
 
-	// Parse output to get device name
-	rootDevice, err := internalParseKpartxOutput(string(output))
+	// Parse kpartx output to get the root partition device
+	rootPartition, err := internalParseKpartxOutput(string(output))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse kpartx output: %w", err)
 	}
 
-	// Wait for device to become available
-	rootDevPath := fmt.Sprintf("/dev/mapper/%s", rootDevice)
-	if err := internalWaitForDevice(rootDevPath, 5*time.Second); err != nil {
-		return "", fmt.Errorf("device not available: %w", err)
-	}
-
-	return rootDevPath, nil
+	// Return the full path to the root partition device
+	return fmt.Sprintf("/dev/mapper/%s", rootPartition), nil
 }
 
-// internalParseKpartxOutput parses kpartx output to extract root partition device path
+// internalParseKpartxOutput parses the output of kpartx to get the root partition device
 func internalParseKpartxOutput(output string) (string, error) {
 	// Example output:
 	// add map loop1p1 (253:1): 0 524288 linear 7:1 8192
@@ -143,8 +150,8 @@ func (a *imageOpsAdapter) CleanupPartitions(imgPathAbs string) error {
 	if !platform.IsLinux() && a.isDockerInitialized() {
 		fmt.Println("Using Docker for partition cleanup...")
 
-		// Execute kpartx cleanup in Docker
-		dockerCmd := fmt.Sprintf("kpartx -d /tmp/%s", filepath.Base(imgPathAbs))
+		// Execute kpartx cleanup in Docker with sudo
+		dockerCmd := fmt.Sprintf("sudo kpartx -d /tmp/%s", filepath.Base(imgPathAbs))
 
 		_, err := a.executeDockerCommand(dockerCmd)
 		if err != nil {
@@ -170,58 +177,47 @@ func (a *imageOpsAdapter) MountFilesystem(partitionDevice, mountDir string) erro
 	if !platform.IsLinux() && a.isDockerInitialized() {
 		fmt.Println("Using Docker for filesystem mounting...")
 
-		// Extract the partition name from the full path
-		partName := filepath.Base(partitionDevice)
-
-		// Make sure the mount directory exists in the container
-		prepareCmd := "mkdir -p /mnt"
-		_, err := a.executeDockerCommand(prepareCmd)
+		// Create mount directory in container
+		mkdirCmd := fmt.Sprintf("sudo mkdir -p %s", mountDir)
+		_, err := a.executeDockerCommand(mkdirCmd)
 		if err != nil {
-			return fmt.Errorf("Docker failed to create mount directory: %w", err)
+			return fmt.Errorf("failed to create mount directory in Docker: %w", err)
 		}
 
-		// Check if /dev/mapper exists and has the device
-		checkMapperCmd := "ls -la /dev/mapper/"
-		mapperOutput, err := a.executeDockerCommand(checkMapperCmd)
-		fmt.Printf("DEBUG: Mapper directory contents: \n%s\n", mapperOutput)
-
-		// Execute mount in Docker - use the full path to the device
-		dockerCmd := fmt.Sprintf("mount %s /mnt", partitionDevice)
+		// Execute mount in Docker with sudo
+		dockerCmd := fmt.Sprintf("sudo mount %s %s", partitionDevice, mountDir)
 		fmt.Printf("DEBUG: Running in container: %s\n", dockerCmd)
 
-		output, err := a.executeDockerCommand(dockerCmd)
+		_, err = a.executeDockerCommand(dockerCmd)
 		if err != nil {
-			return fmt.Errorf("Docker filesystem mounting failed: %w\nOutput: %s", err, output)
+			return fmt.Errorf("Docker filesystem mounting failed: %w", err)
 		}
 
-		// Verify the mount worked
-		verifyCmd := "mount | grep /mnt"
-		verifyOutput, err := a.executeDockerCommand(verifyCmd)
-		if err != nil {
-			return fmt.Errorf("mount verification failed: %w", err)
-		}
-		fmt.Printf("DEBUG: Mount verification: %s\n", verifyOutput)
-
-		fmt.Printf("Docker mounted %s to /mnt\n", partName)
+		fmt.Printf("DEBUG: Mounted %s to %s in Docker container\n", partitionDevice, mountDir)
 		return nil
 	}
 
 	// Native Linux approach
+	// Create mount directory if it doesn't exist
+	if err := os.MkdirAll(mountDir, 0755); err != nil {
+		return fmt.Errorf("failed to create mount directory: %w", err)
+	}
+
+	// Wait for device to be available
+	if err := internalWaitForDevice(partitionDevice, 10*time.Second); err != nil {
+		return fmt.Errorf("device not available: %w", err)
+	}
+
 	cmd := exec.Command("mount", partitionDevice, mountDir)
 	_, err := runCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("mount failed: %w", err)
 	}
 
-	// Verify it's actually mounted
-	if !internalIsMounted(mountDir) {
-		return fmt.Errorf("filesystem not mounted at %s", mountDir)
-	}
-
 	return nil
 }
 
-// internalIsMounted checks if a path is a mountpoint
+// internalIsMounted checks if a path is mounted
 func internalIsMounted(path string) bool {
 	// Only for Linux - for non-Linux platforms, this is handled in the Docker container
 	cmd := exec.Command("mountpoint", "-q", path)
@@ -234,8 +230,8 @@ func (a *imageOpsAdapter) UnmountFilesystem(mountDir string) error {
 	if !platform.IsLinux() && a.isDockerInitialized() {
 		fmt.Println("Using Docker for filesystem unmounting...")
 
-		// Execute umount in Docker
-		dockerCmd := "umount /mnt"
+		// Execute umount in Docker with sudo
+		dockerCmd := fmt.Sprintf("sudo umount %s", mountDir)
 
 		_, err := a.executeDockerCommand(dockerCmd)
 		if err != nil {

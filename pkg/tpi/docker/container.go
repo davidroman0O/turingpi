@@ -57,8 +57,12 @@ func New(config *platform.DockerExecutionConfig) (*Container, error) {
 			fmt.Printf("Using DOCKER_HOST from environment: %s\n", dockerHost)
 		}
 
-		// Try with default environment settings
-		cli, err = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+		// Try with default environment settings and explicit host
+		cli, err = client.NewClientWithOpts(
+			client.FromEnv,
+			client.WithAPIVersionNegotiation(),
+			client.WithHost("unix:///Users/davidroman/.docker/run/docker.sock"),
+		)
 	}
 
 	// If still failing, return a clear error
@@ -71,20 +75,46 @@ func New(config *platform.DockerExecutionConfig) (*Container, error) {
 		return nil, fmt.Errorf("failed to connect to Docker daemon: %w\nEnsure Docker is running and DOCKER_HOST environment variable is set correctly if using a non-default socket", err)
 	}
 
+	// Create container config
+	containerConfig := &container.Config{
+		Image:      config.DockerImage,
+		Cmd:        []string{"sleep", "infinity"},
+		WorkingDir: "/workspace",
+	}
+
+	// Create host config with mounts and privileges
+	hostConfig := &container.HostConfig{
+		Privileged: true, // Required for device operations
+		Binds: []string{
+			fmt.Sprintf("%s:/source:ro", config.SourceDir),
+			fmt.Sprintf("%s:/tmp", config.TempDir),
+			fmt.Sprintf("%s:/output", config.OutputDir),
+		},
+		CapAdd: []string{
+			"SYS_ADMIN",
+			"MKNOD",
+		},
+		SecurityOpt: []string{
+			"apparmor:unconfined",
+		},
+	}
+
+	// Create container
+	resp, err := cli.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, config.ContainerName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container: %w", err)
+	}
+
+	// Start container
+	if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return nil, fmt.Errorf("failed to start container: %w", err)
+	}
+
 	c := &Container{
-		Config: config,
-		cli:    cli,
-		ctx:    ctx,
-	}
-
-	// Ensure Docker image exists
-	if err := c.ensureDockerImage(); err != nil {
-		return nil, err
-	}
-
-	// Create a persistent container
-	if err := c.createContainer(); err != nil {
-		return nil, err
+		Config:      config,
+		ContainerID: resp.ID,
+		cli:         cli,
+		ctx:         ctx,
 	}
 
 	// Register container with the global registry
@@ -117,6 +147,9 @@ func getDockerContextDetails() (DockerContextInfo, error) {
 		return info, fmt.Errorf("failed to get current Docker context: %w", err)
 	}
 	info.Name = strings.TrimSpace(string(nameOutput))
+	// Remove the * suffix if present (indicates active context)
+	info.Name = strings.TrimSuffix(info.Name, "*")
+	info.Name = strings.TrimSpace(info.Name)
 
 	// Then get host for that context
 	hostCmd := exec.Command("docker", "context", "inspect", info.Name, "--format", "{{.Endpoints.docker.Host}}")
@@ -341,14 +374,14 @@ func (c *Container) createContainer() error {
 		}
 
 		fmt.Printf("DEBUG: Setting up mounts for turingpi-prepare image\n")
-		fmt.Printf("DEBUG: Source Dir: %s -> /images:ro\n", c.Config.SourceDir)
+		fmt.Printf("DEBUG: Source Dir: %s -> /source:ro\n", c.Config.SourceDir)
 		fmt.Printf("DEBUG: Temp Dir: %s -> /tmp\n", c.Config.TempDir)
-		fmt.Printf("DEBUG: Output Dir: %s -> /prepared-images\n", c.Config.OutputDir)
+		fmt.Printf("DEBUG: Output Dir: %s -> /output\n", c.Config.OutputDir)
 
 		binds = []string{
-			fmt.Sprintf("%s:/images:ro", c.Config.SourceDir),
+			fmt.Sprintf("%s:/source:ro", c.Config.SourceDir),
 			fmt.Sprintf("%s:/tmp", c.Config.TempDir),
-			fmt.Sprintf("%s:/prepared-images", c.Config.OutputDir),
+			fmt.Sprintf("%s:/output", c.Config.OutputDir),
 		}
 	} else {
 		// Standard mounts for other images
@@ -566,7 +599,8 @@ func (c *Container) Cleanup() error {
 		if client.IsErrNotFound(err) {
 			fmt.Printf("Container %s no longer exists, nothing to clean up\n", c.ContainerID)
 			// Unregister from registry even though it doesn't exist
-			GetRegistry().UnregisterContainer(containerID)
+			registry := GetRegistry()
+			registry.UnregisterContainer(containerID)
 			return nil
 		}
 		// For other errors, we still try to remove the container
@@ -587,13 +621,15 @@ func (c *Container) Cleanup() error {
 	removeErr := c.cli.ContainerRemove(ctx, c.ContainerID, container.RemoveOptions{Force: true})
 	if removeErr != nil {
 		// Unregister from registry even if error, as we can't do more
-		GetRegistry().UnregisterContainer(containerID)
+		registry := GetRegistry()
+		registry.UnregisterContainer(containerID)
 		return fmt.Errorf("error removing container: %w", removeErr)
 	}
 
 	fmt.Printf("Container %s (Name: %s) successfully removed\n", c.ContainerID, c.Config.ContainerName)
 	// Unregister from registry after successful cleanup
-	GetRegistry().UnregisterContainer(containerID)
+	registry := GetRegistry()
+	registry.UnregisterContainer(containerID)
 	return nil
 }
 

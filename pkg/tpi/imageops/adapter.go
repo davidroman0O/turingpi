@@ -1,83 +1,64 @@
-// Package imageops provides functions for OS image preparation and modification.
 package imageops
 
 import (
+	"bytes"
+	"context"
+	"fmt"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/docker"
+	"github.com/davidroman0O/turingpi/pkg/tpi/imageops/ops"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
+	"github.com/docker/docker/client"
 )
 
-// ImageOpsAdapter defines the interface for image operations.
+// ImageOpsAdapter defines the interface for image operations
 type ImageOpsAdapter interface {
-	// PrepareImage decompresses a disk image, modifies it with network settings, and recompresses it.
-	PrepareImage(opts PrepareImageOptions) (string, error)
+	// PrepareImage prepares an image with the given options
+	PrepareImage(ctx context.Context, opts ops.PrepareImageOptions) error
 
-	// DecompressImageXZ decompresses an XZ-compressed disk image.
-	DecompressImageXZ(sourceImgXZAbs, tmpDir string) (string, error)
+	// ExecuteFileOperations executes a series of file operations on the image
+	ExecuteFileOperations(ctx context.Context, params ops.ExecuteParams) error
 
-	// MapPartitions uses kpartx to map disk partitions.
+	// Cleanup performs any necessary cleanup
+	Cleanup(ctx context.Context) error
+
+	// Internal methods for image operations
 	MapPartitions(imgPathAbs string) (string, error)
-
-	// CleanupPartitions unmaps partitions.
 	CleanupPartitions(imgPathAbs string) error
-
-	// MountFilesystem mounts a filesystem.
 	MountFilesystem(partitionDevice, mountDir string) error
-
-	// UnmountFilesystem unmounts a filesystem.
 	UnmountFilesystem(mountDir string) error
-
-	// ApplyNetworkConfig applies network config to the mounted filesystem.
 	ApplyNetworkConfig(mountDir string, hostname string, ipCIDR string, gateway string, dnsServers []string) error
-
-	// RecompressImageXZ compresses a disk image with XZ.
+	DecompressImageXZ(sourceImgXZAbs, tmpDir string) (string, error)
 	RecompressImageXZ(modifiedImgPath, finalXZPath string) error
-
-	// ExecuteFileOperations executes a batch of file operations.
-	ExecuteFileOperations(params ExecuteFileOperationsParams) error
-
-	// WriteToImageFile writes content to a file within the mounted image.
 	WriteToImageFile(mountDir, relativePath string, content []byte, perm fs.FileMode) error
-
-	// CopyFileToImage copies a local file into the mounted image.
 	CopyFileToImage(mountDir, localSourcePath, relativeDestPath string) error
-
-	// MkdirInImage creates a directory within the mounted image.
 	MkdirInImage(mountDir, relativePath string, perm fs.FileMode) error
-
-	// ChmodInImage changes permissions of a file/directory within the mounted image.
 	ChmodInImage(mountDir, relativePath string, perm fs.FileMode) error
-
-	// Cleanup releases any resources used by the adapter.
-	Cleanup() error
 }
 
-// PrepareImageOptions contains all parameters needed to prepare an image
-type PrepareImageOptions struct {
-	SourceImgXZ  string   // Path to the source compressed image
-	NodeNum      int      // Node number (used for default hostname if needed)
-	IPAddress    string   // IP address without CIDR
-	IPCIDRSuffix string   // CIDR suffix (e.g., "/24")
-	Hostname     string   // Hostname to set
-	Gateway      string   // Gateway IP address
-	DNSServers   []string // List of DNS server IPs
-	OutputDir    string   // Directory to store output image
-	TempDir      string   // Directory for temporary processing
-}
-
-// imageOpsAdapter implements the ImageOpsAdapter interface.
+// imageOpsAdapter implements the ImageOpsAdapter interface
 type imageOpsAdapter struct {
+	dockerClient  *client.Client
 	dockerAdapter *docker.DockerAdapter
-	dockerConfig  *platform.DockerExecutionConfig
+	dockerConfig  *ops.DockerConfig
 	startTime     time.Time
+	sourceDir     string
+	tempDir       string
+	outputDir     string
 }
 
-// NewImageOpsAdapter creates a new adapter for image operations.
+// NewImageOpsAdapter creates a new adapter for image operations
 func NewImageOpsAdapter(sourceDir, tempDir, outputDir string) (ImageOpsAdapter, error) {
 	adapter := &imageOpsAdapter{
 		startTime: time.Now(),
+		sourceDir: sourceDir,
+		tempDir:   tempDir,
+		outputDir: outputDir,
 	}
 
 	// Initialize Docker for non-Linux platforms
@@ -90,13 +71,92 @@ func NewImageOpsAdapter(sourceDir, tempDir, outputDir string) (ImageOpsAdapter, 
 	return adapter, nil
 }
 
-// Cleanup releases any resources used by the adapter.
-func (a *imageOpsAdapter) Cleanup() error {
+func (a *imageOpsAdapter) ExecuteFileOperations(ctx context.Context, params ops.ExecuteParams) error {
+	return ops.Execute(params)
+}
+
+func (a *imageOpsAdapter) Cleanup(ctx context.Context) error {
 	if a.dockerAdapter != nil {
 		return a.dockerAdapter.Close()
 	}
 	return nil
 }
 
-// The adapter will need helper methods and implementations of the interface methods,
-// which will be contained in other files.
+func (a *imageOpsAdapter) WriteToImageFile(mountDir, relativePath string, content []byte, perm fs.FileMode) error {
+	filePath := filepath.Join(mountDir, relativePath)
+	return writeToFileAsRoot(filePath, content, perm)
+}
+
+func (a *imageOpsAdapter) CopyFileToImage(mountDir, localSourcePath, relativeDestPath string) error {
+	content, err := os.ReadFile(localSourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to read source file: %w", err)
+	}
+	return a.WriteToImageFile(mountDir, relativeDestPath, content, 0644)
+}
+
+func (a *imageOpsAdapter) MkdirInImage(mountDir, relativePath string, perm fs.FileMode) error {
+	dirPath := filepath.Join(mountDir, relativePath)
+	cmd := exec.Command("sudo", "mkdir", "-p", dirPath)
+	_, err := runCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Set permissions
+	return a.ChmodInImage(mountDir, relativePath, perm)
+}
+
+func (a *imageOpsAdapter) ChmodInImage(mountDir, relativePath string, perm fs.FileMode) error {
+	path := filepath.Join(mountDir, relativePath)
+	cmd := exec.Command("sudo", "chmod", fmt.Sprintf("%o", perm), path)
+	_, err := runCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to set permissions: %w", err)
+	}
+	return nil
+}
+
+// runCommand runs a command and returns its output
+func runCommand(cmd *exec.Cmd) ([]byte, error) {
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
+// writeToFileAsRoot writes content to a file as root
+func writeToFileAsRoot(filePath string, content []byte, perm fs.FileMode) error {
+	// Create temp file
+	tempFile, err := os.CreateTemp(filepath.Dir(filePath), "tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	// Write content to temp file
+	if _, err := tempFile.Write(content); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+	tempFile.Close()
+
+	// Set permissions on temp file
+	if err := os.Chmod(tempPath, perm); err != nil {
+		return fmt.Errorf("failed to set temp file permissions: %w", err)
+	}
+
+	// Move temp file to target path (requires root)
+	cmd := exec.Command("sudo", "mv", tempPath, filePath)
+	_, err = runCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to move file: %w", err)
+	}
+
+	return nil
+}

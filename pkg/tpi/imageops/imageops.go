@@ -7,10 +7,12 @@ New code should use the adapter interface directly.
 */
 
 import (
+	"context"
 	"io/fs"
 	"sync"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/docker"
+	"github.com/davidroman0O/turingpi/pkg/tpi/imageops/ops"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
 )
 
@@ -54,7 +56,8 @@ func InitAdapter(srcDir, tmpDir, outDir string) error {
 
 	// Clean up any existing adapter
 	if globalAdapter != nil {
-		globalAdapter.Cleanup()
+		ctx := context.Background()
+		globalAdapter.Cleanup(ctx)
 		globalAdapter = nil
 	}
 
@@ -70,7 +73,8 @@ func CleanupAdapter() error {
 	defer adapterMu.Unlock()
 
 	if globalAdapter != nil {
-		err := globalAdapter.Cleanup()
+		ctx := context.Background()
+		err := globalAdapter.Cleanup(ctx)
 		globalAdapter = nil
 		return err
 	}
@@ -81,12 +85,13 @@ func CleanupAdapter() error {
 // They all use the global adapter instance
 
 // PrepareImage prepares an image using the global adapter
-func PrepareImage(opts PrepareImageOptions) (string, error) {
+func PrepareImage(opts ops.PrepareImageOptions) error {
 	adapter, err := GetAdapter()
 	if err != nil {
-		return "", err
+		return err
 	}
-	return adapter.PrepareImage(opts)
+	ctx := context.Background()
+	return adapter.PrepareImage(ctx, opts)
 }
 
 // DecompressImageXZ decompresses an XZ-compressed disk image
@@ -189,12 +194,13 @@ func RecompressImageXZ(modifiedImgPath, finalXZPath string) error {
 }
 
 // ExecuteFileOperations executes a batch of file operations
-func ExecuteFileOperations(params ExecuteFileOperationsParams) error {
+func ExecuteFileOperations(params ops.ExecuteParams) error {
 	adapter, err := GetAdapter()
 	if err != nil {
 		return err
 	}
-	return adapter.ExecuteFileOperations(params)
+	ctx := context.Background()
+	return adapter.ExecuteFileOperations(ctx, params)
 }
 
 // DockerAdapter returns the Docker adapter from the global adapter

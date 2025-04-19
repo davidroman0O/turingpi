@@ -16,7 +16,7 @@ func (a *imageOpsAdapter) ApplyNetworkConfig(mountDir string, hostname string, i
 		fmt.Println("Using Docker for network configuration...")
 
 		// Set hostname
-		hostnameCmd := fmt.Sprintf("echo '%s' > /mnt/etc/hostname", hostname)
+		hostnameCmd := fmt.Sprintf("echo '%s' > %s/etc/hostname", hostname, mountDir)
 		_, err := a.executeDockerCommand(hostnameCmd)
 		if err != nil {
 			return fmt.Errorf("Docker hostname config failed: %w", err)
@@ -24,14 +24,14 @@ func (a *imageOpsAdapter) ApplyNetworkConfig(mountDir string, hostname string, i
 
 		// Update /etc/hosts
 		hostsContent := fmt.Sprintf("127.0.0.1\tlocalhost\n127.0.1.1\t%s\n\n", hostname)
-		hostsCmd := fmt.Sprintf("echo '%s' > /mnt/etc/hosts", hostsContent)
+		hostsCmd := fmt.Sprintf("echo '%s' > %s/etc/hosts", hostsContent, mountDir)
 		_, err = a.executeDockerCommand(hostsCmd)
 		if err != nil {
 			return fmt.Errorf("Docker hosts file config failed: %w", err)
 		}
 
 		// Check if image uses Netplan
-		checkNetplanCmd := "[ -d /mnt/etc/netplan ] && echo 'netplan' || echo 'interfaces'"
+		checkNetplanCmd := fmt.Sprintf("[ -d %s/etc/netplan ] && echo 'netplan' || echo 'interfaces'", mountDir)
 		netplanCheckOutput, err := a.executeDockerCommand(checkNetplanCmd)
 		if err != nil {
 			return fmt.Errorf("Docker netplan check failed: %w", err)
@@ -56,7 +56,7 @@ network:
         addresses: [%s]
 `, ipCIDR, gateway, dnsAddrs)
 
-			netplanCmd := fmt.Sprintf("mkdir -p /mnt/etc/netplan && echo '%s' > /mnt/etc/netplan/01-netcfg.yaml", netplanYaml)
+			netplanCmd := fmt.Sprintf("mkdir -p %s/etc/netplan && echo '%s' > %s/etc/netplan/01-netcfg.yaml", mountDir, netplanYaml, mountDir)
 			_, err = a.executeDockerCommand(netplanCmd)
 			if err != nil {
 				return fmt.Errorf("Docker netplan config failed: %w", err)
@@ -101,7 +101,7 @@ iface eth0 inet static
     %s
 `, ipAddr, netmask, gateway, dnsLine)
 
-			interfacesCmd := fmt.Sprintf("mkdir -p /mnt/etc/network && echo '%s' > /mnt/etc/network/interfaces", interfacesContent)
+			interfacesCmd := fmt.Sprintf("mkdir -p %s/etc/network && echo '%s' > %s/etc/network/interfaces", mountDir, interfacesContent, mountDir)
 			_, err = a.executeDockerCommand(interfacesCmd)
 			if err != nil {
 				return fmt.Errorf("Docker interfaces config failed: %w", err)

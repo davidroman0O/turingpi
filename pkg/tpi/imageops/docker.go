@@ -4,19 +4,26 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/tpi/docker"
+	"github.com/davidroman0O/turingpi/pkg/tpi/imageops/ops"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
+	"github.com/docker/docker/api/types/mount"
 )
 
-// containerID stores the ID of the persistent container we create for operations
-var containerID string
+// dockerInitTimeout is the timeout for Docker initialization operations
+const dockerInitTimeout = 30 * time.Second
+
+// dockerCommandTimeout is the timeout for Docker command execution
+const dockerCommandTimeout = 10 * time.Minute
 
 // initDocker initializes the Docker configuration for cross-platform operations
 func (a *imageOpsAdapter) initDocker(sourceDir, tempDir, outputDir string) error {
-	// We'll use the Docker adapter to manage Docker resources
-	var err error
+	// Create a context with timeout for initialization
+	ctx, cancel := context.WithTimeout(context.Background(), dockerInitTimeout)
+	defer cancel()
 
 	log.Printf("InitDockerConfig called with:\n")
 	log.Printf("  sourceDir: %s\n", sourceDir)
@@ -24,75 +31,131 @@ func (a *imageOpsAdapter) initDocker(sourceDir, tempDir, outputDir string) error
 	log.Printf("  outputDir: %s\n", outputDir)
 
 	// Create a temporary config first to set the image name
-	config := platform.NewDefaultDockerConfig(sourceDir, tempDir, outputDir)
+	containerName := fmt.Sprintf("turingpi-prep-%d", time.Now().UnixNano())
 
-	// Set the image to turingpi-prepare which triggers special handling
-	config.DockerImage = "turingpi-prepare"
+	// Convert paths to absolute paths
+	sourceAbs, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for source dir: %w", err)
+	}
+	tempAbs, err := filepath.Abs(tempDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for temp dir: %w", err)
+	}
+	outputAbs, err := filepath.Abs(outputDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for output dir: %w", err)
+	}
 
-	// Ensure we use a unique container name to avoid conflicts
-	config.UseUniqueContainerName = true
+	config := &ops.DockerConfig{
+		Image:           "turingpi-prepare",
+		ContainerName:   containerName,
+		NetworkDisabled: true,
+		WorkingDir:      "/workspace",
+		SourceDir:       sourceAbs,
+		TempDir:         tempAbs,
+		OutputDir:       outputAbs,
+		Mounts: []mount.Mount{
+			{
+				Type:   mount.TypeBind,
+				Source: sourceAbs,
+				Target: "/source",
+			},
+			{
+				Type:   mount.TypeBind,
+				Source: tempAbs,
+				Target: "/temp",
+			},
+			{
+				Type:   mount.TypeBind,
+				Source: outputAbs,
+				Target: "/output",
+			},
+		},
+	}
 
-	log.Printf("Docker configuration prepared:\n")
-	log.Printf("  Image: %s\n", config.DockerImage)
-	log.Printf("  Container Name: %s\n", config.ContainerName)
-	log.Printf("  Source Dir: %s\n", config.SourceDir)
-	log.Printf("  Temp Dir: %s\n", config.TempDir)
-	log.Printf("  Output Dir: %s\n", config.OutputDir)
-	log.Printf("  Additional Mounts: %d\n", len(config.AdditionalMounts))
-
-	// Create the adapter with our custom config - with retries
+	// Create the Docker adapter with retries
+	var lastErr error
 	maxRetries := 3
 	for retry := 0; retry < maxRetries; retry++ {
-		log.Printf("Attempting to create Docker adapter (attempt %d/%d)...\n", retry+1, maxRetries)
-		ctx := context.Background()
-		a.dockerAdapter, err = docker.NewAdapter(ctx, sourceDir, tempDir, outputDir)
-		if err == nil {
-			break
-		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("Docker initialization timed out after %v", dockerInitTimeout)
+		default:
+			log.Printf("Attempting to create Docker client (attempt %d/%d)...\n", retry+1, maxRetries)
 
-		if retry < maxRetries-1 {
-			waitTime := time.Duration(retry+1) * time.Second
-			log.Printf("Docker connection attempt %d failed: %v. Retrying in %v...\n",
-				retry+1, err, waitTime)
-			time.Sleep(waitTime)
+			// Create a Docker configuration that uses the turingpi-prepare image
+			dockerConfig := platform.NewDefaultDockerConfig(sourceDir, tempDir, outputDir)
+			dockerConfig.DockerImage = "turingpi-prepare"
+
+			adapter, err := docker.NewAdapter(ctx, sourceDir, tempDir, outputDir)
+			if err == nil {
+				// Store the adapter and config
+				a.dockerAdapter = adapter
+				a.dockerConfig = config
+				log.Printf("Docker client initialized successfully")
+				return nil
+			}
+
+			lastErr = fmt.Errorf("failed to create Docker adapter: %w", err)
+
+			if retry < maxRetries-1 {
+				waitTime := time.Duration(retry+1) * time.Second
+				log.Printf("Docker connection attempt %d failed: %v. Retrying in %v...\n",
+					retry+1, lastErr, waitTime)
+				time.Sleep(waitTime)
+			}
 		}
 	}
 
-	if err != nil {
-		// Clear any partially initialized adapter
-		if a.dockerAdapter != nil {
-			ctx := context.Background()
-			a.dockerAdapter.Cleanup(ctx)
-		}
-		a.dockerAdapter = nil
-		a.dockerConfig = nil
-		containerID = ""
-		return fmt.Errorf("critical error: failed to initialize Docker after %d attempts: %w",
-			maxRetries, err)
-	}
-
-	// Keep the DockerConfig for backward compatibility
-	a.dockerConfig = a.dockerAdapter.Container.Config
-	containerID = a.dockerAdapter.GetContainerID()
-
-	log.Printf("Docker adapter initialized successfully.\n")
-	log.Printf("  Container ID: %s\n", containerID)
-	log.Printf("  Container Name: %s\n", a.dockerAdapter.GetContainerName())
-
-	return nil
+	return fmt.Errorf("critical error: failed to initialize Docker after %d attempts: %w",
+		maxRetries, lastErr)
 }
 
-// executeDockerCommand executes a command in the Docker container
+// executeDockerCommand executes a command in the Docker container with timeout
 func (a *imageOpsAdapter) executeDockerCommand(command string) (string, error) {
-	if a.dockerAdapter == nil {
-		return "", fmt.Errorf("Docker adapter not initialized but required for command execution")
+	if !a.isDockerInitialized() {
+		// Try to reinitialize Docker if it's not initialized
+		if err := a.initDocker(a.sourceDir, a.tempDir, a.outputDir); err != nil {
+			return "", fmt.Errorf("failed to reinitialize Docker: %w", err)
+		}
 	}
 
-	ctx := context.Background()
-	return a.dockerAdapter.ExecuteCommand(ctx, command)
+	// Create context with timeout for command execution
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCommandTimeout)
+	defer cancel()
+
+	// Log command execution
+	log.Printf("Executing Docker command: %s\n", command)
+
+	// Use the Docker adapter to execute the command
+	if a.dockerAdapter != nil {
+		return a.dockerAdapter.ExecuteCommand(ctx, command)
+	}
+
+	return "", fmt.Errorf("Docker adapter is not initialized")
 }
 
 // isDockerInitialized checks if Docker is properly initialized
 func (a *imageOpsAdapter) isDockerInitialized() bool {
 	return a.dockerAdapter != nil && a.dockerConfig != nil
+}
+
+// cleanupDocker ensures proper cleanup of Docker resources
+func (a *imageOpsAdapter) cleanupDocker() error {
+	if !a.isDockerInitialized() {
+		return nil
+	}
+
+	log.Printf("Cleaning up Docker resources...")
+
+	if a.dockerAdapter != nil {
+		if err := a.dockerAdapter.Close(); err != nil {
+			log.Printf("Warning: Failed to close Docker adapter: %v", err)
+		}
+		a.dockerAdapter = nil
+	}
+
+	a.dockerConfig = nil
+	return nil
 }

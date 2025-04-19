@@ -12,6 +12,7 @@ import (
 
 	"github.com/davidroman0O/turingpi/pkg/tpi" // Base tpi types
 	"github.com/davidroman0O/turingpi/pkg/tpi/imageops"
+	"github.com/davidroman0O/turingpi/pkg/tpi/imageops/ops"
 	"github.com/davidroman0O/turingpi/pkg/tpi/platform" // Platform detection
 	"github.com/davidroman0O/turingpi/pkg/tpi/state"
 )
@@ -22,8 +23,8 @@ type UbuntuImageBuilder struct {
 	baseImageXZPath  string
 	networkConfig    *tpi.NetworkConfig // Pointer to allow optional config
 	preInstallFunc   func(image tpi.ImageModifier) error
-	stagedOperations []imageops.FileOperation // Collected from preInstallFunc
-	outputDirectory  string                   // Custom output directory for prepared images
+	stagedOperations []ops.Operation // Collected from preInstallFunc
+	outputDirectory  string          // Custom output directory for prepared images
 }
 
 // NewImageBuilder creates a new builder for customizing an Ubuntu image.
@@ -80,7 +81,6 @@ func (b *UbuntuImageBuilder) calculateInputHash() (string, error) {
 	// Hash staged file operations (represent them as strings)
 	for _, op := range b.stagedOperations {
 		// Use a stable representation of the operation
-		// TODO: Enhance this representation to be more robust
 		opString := fmt.Sprintf("%s:%+v", op.Type(), op)
 		if _, err := h.Write([]byte(opString)); err != nil {
 			return "", err
@@ -126,7 +126,7 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 
 	// Execute the pre-install function if provided, to stage file operations
 	log.Printf("Executing pre-install callback to stage file operations...")
-	b.stagedOperations = []imageops.FileOperation{} // Reset operations before collection
+	b.stagedOperations = []ops.Operation{} // Reset operations before collection
 
 	// Create a fresh image modifier for the pre-install callback
 	imageModifier := tpi.NewImageModifierImpl()
@@ -268,7 +268,7 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	}
 
 	// Prepare image prep options
-	prepOpts := imageops.PrepareImageOptions{
+	prepOpts := ops.PrepareImageOptions{
 		SourceImgXZ:  b.baseImageXZPath,
 		NodeNum:      int(b.nodeID),
 		IPAddress:    ipWithoutCIDR,
@@ -284,13 +284,16 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 	fmt.Println("Executing image preparation script in Docker...")
 
 	// Execute the preparation
-	outputPath, err := imageops.PrepareImage(prepOpts)
+	adapter, err := imageops.GetAdapter()
 	if err != nil {
+		return b.failPhase(cluster, fmt.Errorf("failed to get adapter: %w", err))
+	}
+
+	if err := adapter.PrepareImage(context.Background(), prepOpts); err != nil {
 		return b.failPhase(cluster, fmt.Errorf("image preparation failed: %w", err))
 	}
 
-	fmt.Printf("Docker preparation completed successfully. Output: %s\n", outputPath)
-	finalImagePath = outputPath // Use the path returned by PrepareImage
+	fmt.Printf("Docker preparation completed successfully. Output: %s\n", finalImagePath)
 
 	log.Printf("Image preparation completed successfully: %s", finalImagePath)
 
@@ -333,12 +336,12 @@ func (b *UbuntuImageBuilder) Run(ctx tpi.Context, cluster tpi.Cluster) (*tpi.Ima
 		}()
 
 		// 4. Execute the staged file operations
-		fileOpsParams := imageops.ExecuteFileOperationsParams{
+		fileOpsParams := ops.ExecuteParams{
 			MountDir:   mountDir,
 			Operations: b.stagedOperations,
 		}
 
-		err = imageops.ExecuteFileOperations(fileOpsParams)
+		err = adapter.ExecuteFileOperations(context.Background(), fileOpsParams)
 		if err != nil {
 			return b.failPhase(cluster, fmt.Errorf("failed to apply file operations: %w", err))
 		}
