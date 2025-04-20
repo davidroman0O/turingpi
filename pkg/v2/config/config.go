@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/davidroman0O/turingpi/workflows/store"
+	"github.com/davidroman0O/gostate/store"
 )
 
 // Config provides a configuration management system
