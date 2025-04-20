@@ -12,7 +12,7 @@ import (
 
 /// can use `docker context list`
 
-// DockerAdapter provides an interface for imageops to interact with Docker
+// DockerAdapter provides an interface to interact with Docker containers
 type DockerAdapter struct {
 	// The Docker container instance
 	Container *Container
@@ -40,7 +40,8 @@ func NewAdapter(ctx context.Context, sourceDir, tempDir, outputDir string) (*Doc
 		if a.Container != nil {
 			fmt.Printf("Warning: Finalizer cleaning up Docker container %s that wasn't properly closed\n",
 				a.Container.ContainerID)
-			a.Container.Cleanup()
+			// Use background context since this is a finalizer
+			_ = a.Container.Cleanup(context.Background())
 		}
 	})
 
@@ -89,18 +90,9 @@ func (a *DockerAdapter) CopyFileToContainer(localPath, containerPath string) err
 	return nil
 }
 
-// Close properly cleans up Docker resources and returns any error
-// This is the preferred method to call explicitly when done with the adapter
+// Close implements io.Closer
 func (a *DockerAdapter) Close() error {
-	if a.Container == nil {
-		return nil // Already closed or never initialized
-	}
-
-	err := a.Container.Cleanup()
-	// Set Container to nil to prevent double cleanup and mark as closed
-	a.Container = nil
-
-	return err
+	return a.Cleanup(context.Background())
 }
 
 // GetContainerID returns the ID of the current Docker container
@@ -119,7 +111,15 @@ func (a *DockerAdapter) GetContainerName() string {
 	return a.Container.Config.ContainerName
 }
 
-// Cleanup performs cleanup with context
+// Cleanup stops and removes the container
 func (a *DockerAdapter) Cleanup(ctx context.Context) error {
-	return a.Close()
+	if a.Container == nil {
+		return nil
+	}
+	err := a.Container.Cleanup(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to cleanup container: %w", err)
+	}
+	a.Container = nil
+	return nil
 }

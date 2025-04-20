@@ -577,59 +577,40 @@ func (c *Container) CopyFileToContainer(srcPath, destPath string) error {
 	return nil
 }
 
-// Cleanup stops and removes the Docker container
-func (c *Container) Cleanup() error {
+// Cleanup stops and removes the container
+func (c *Container) Cleanup(ctx context.Context) error {
 	if c.ContainerID == "" {
-		fmt.Println("No container ID to clean up")
+		fmt.Printf("Container ID is empty, nothing to clean up\n")
 		return nil
 	}
 
-	// Store containerID for registry cleanup even if removed during cleanup
-	containerID := c.ContainerID
-
-	fmt.Printf("Cleaning up container %s (Name: %s)...\n", c.ContainerID, c.Config.ContainerName)
-
-	// Create a context with timeout for cleanup operations
-	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
-	defer cancel()
-
-	// Check if container exists before trying to stop it
+	// Inspect container to see if it exists
 	_, err := c.cli.ContainerInspect(ctx, c.ContainerID)
 	if err != nil {
-		if client.IsErrNotFound(err) {
-			fmt.Printf("Container %s no longer exists, nothing to clean up\n", c.ContainerID)
-			// Unregister from registry even though it doesn't exist
-			registry := GetRegistry()
-			registry.UnregisterContainer(containerID)
-			return nil
-		}
-		// For other errors, we still try to remove the container
-		fmt.Printf("Warning: Error inspecting container %s: %v (will still try to remove)\n", c.ContainerID, err)
+		// If container doesn't exist, just unregister and return
+		c.unregister()
+		return nil
 	}
 
 	// Stop container with timeout
-	stopTimeout := 10 // seconds
-	stopErr := c.cli.ContainerStop(ctx, c.ContainerID, container.StopOptions{Timeout: &stopTimeout})
-	if stopErr != nil {
-		fmt.Printf("Warning: Error stopping container: %v (will still try to force remove)\n", stopErr)
+	timeout := 10 // seconds
+	err = c.cli.ContainerStop(ctx, c.ContainerID, container.StopOptions{Timeout: &timeout})
+	if err != nil {
+		fmt.Printf("Warning: Failed to stop container %s: %v\n", c.ContainerID, err)
 		// Continue to removal even if stop fails
-	} else {
-		fmt.Printf("Container %s stopped successfully\n", c.ContainerID)
 	}
 
-	// Remove container with force option to ensure it's removed even if running
-	removeErr := c.cli.ContainerRemove(ctx, c.ContainerID, container.RemoveOptions{Force: true})
-	if removeErr != nil {
-		// Unregister from registry even if error, as we can't do more
-		registry := GetRegistry()
-		registry.UnregisterContainer(containerID)
-		return fmt.Errorf("error removing container: %w", removeErr)
+	// Force remove container
+	err = c.cli.ContainerRemove(ctx, c.ContainerID, container.RemoveOptions{Force: true})
+
+	// Always unregister, even if removal failed
+	c.unregister()
+
+	if err != nil {
+		return fmt.Errorf("failed to remove container %s: %w", c.ContainerID, err)
 	}
 
-	fmt.Printf("Container %s (Name: %s) successfully removed\n", c.ContainerID, c.Config.ContainerName)
-	// Unregister from registry after successful cleanup
-	registry := GetRegistry()
-	registry.UnregisterContainer(containerID)
+	fmt.Printf("Successfully removed container %s\n", c.ContainerID)
 	return nil
 }
 
@@ -641,4 +622,9 @@ func (c *Container) GetContainerID() string {
 // GetContainerName returns the container name
 func (c *Container) GetContainerName() string {
 	return c.Config.ContainerName
+}
+
+func (c *Container) unregister() {
+	registry := GetRegistry()
+	registry.UnregisterContainer(c.ContainerID)
 }

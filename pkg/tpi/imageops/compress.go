@@ -46,7 +46,7 @@ func (a *imageOpsAdapter) DecompressImageXZ(sourceImgXZAbs, tmpDir string) (stri
 		}
 
 		// Execute xz decompression in Docker
-		dockerCmd := fmt.Sprintf("xz -d -k %s", containerImgPath)
+		dockerCmd := fmt.Sprintf("xz -d -k -f %s", containerImgPath)
 		fmt.Printf("DEBUG: Running in container: %s\n", dockerCmd)
 
 		output, err := a.executeDockerCommand(dockerCmd)
@@ -101,7 +101,7 @@ func (a *imageOpsAdapter) RecompressImageXZ(modifiedImgPath, finalXZPath string)
 		}
 
 		// Execute xz compression
-		dockerCmd := fmt.Sprintf("xz -9 -k %s", modifiedImgPath)
+		dockerCmd := fmt.Sprintf("xz -9 -k -f %s", modifiedImgPath)
 		fmt.Printf("DEBUG: Running in container: %s\n", dockerCmd)
 
 		output, err := a.executeDockerCommand(dockerCmd)

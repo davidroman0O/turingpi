@@ -42,6 +42,48 @@ func getSSHClientConfig(cfg SSHConfig) (*ssh.ClientConfig, error) {
 
 // ExecuteCommand implements BMCAdapter.ExecuteCommand.
 func (a *bmcAdapter) ExecuteCommand(command string) (stdout string, stderr string, err error) {
+	const maxRetries = 3
+	const retryDelay = 5 * time.Second
+
+	var lastErr error
+	var stdoutStr, stderrStr string
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			log.Printf("[BMC SSH EXEC] Retry attempt %d/%d after waiting %v...",
+				attempt, maxRetries, retryDelay)
+			time.Sleep(retryDelay)
+		}
+
+		stdoutStr, stderrStr, err = a.executeCommandOnce(command)
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("[BMC SSH EXEC] Successfully executed command on retry attempt %d", attempt)
+			}
+			return stdoutStr, stderrStr, nil
+		}
+
+		lastErr = err
+		log.Printf("[BMC SSH EXEC] Attempt %d failed: %v", attempt, err)
+
+		// Check if it's a network timeout error
+		if strings.Contains(err.Error(), "i/o timeout") ||
+			strings.Contains(err.Error(), "connection refused") ||
+			strings.Contains(err.Error(), "no route to host") {
+			log.Printf("[BMC SSH EXEC] Network issue detected, will retry...")
+			continue
+		}
+
+		// If it's not a network error, don't retry
+		log.Printf("[BMC SSH EXEC] Error doesn't seem to be network-related, won't retry")
+		break
+	}
+
+	return stdoutStr, stderrStr, fmt.Errorf("command '%s' failed after %d attempts: %w", command, maxRetries, lastErr)
+}
+
+// executeCommandOnce performs a single attempt to execute a command
+func (a *bmcAdapter) executeCommandOnce(command string) (stdout string, stderr string, err error) {
 	sshConfig, err := getSSHClientConfig(a.config)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid SSH config: %w", err)
@@ -88,9 +130,51 @@ func (a *bmcAdapter) ExecuteCommand(command string) (stdout string, stderr strin
 
 // CheckFileExists implements BMCAdapter.CheckFileExists.
 func (a *bmcAdapter) CheckFileExists(remotePath string) (bool, error) {
+	const maxRetries = 3
+	const retryDelay = 5 * time.Second
+
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			log.Printf("[BMC SSH LS] Retry attempt %d/%d after waiting %v...",
+				attempt, maxRetries, retryDelay)
+			time.Sleep(retryDelay)
+		}
+
+		exists, err := a.checkFileExistsOnce(remotePath)
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("[BMC SSH LS] Successfully checked file existence on retry attempt %d", attempt)
+			}
+			return exists, nil
+		}
+
+		lastErr = err
+		log.Printf("[BMC SSH LS] Attempt %d failed: %v", attempt, err)
+
+		// Check if it's a network timeout error
+		if strings.Contains(err.Error(), "i/o timeout") ||
+			strings.Contains(err.Error(), "connection refused") ||
+			strings.Contains(err.Error(), "no route to host") {
+			log.Printf("[BMC SSH LS] Network issue detected, will retry...")
+			continue
+		}
+
+		// If it's not a network error, don't retry
+		log.Printf("[BMC SSH LS] Error doesn't seem to be network-related, won't retry")
+		break
+	}
+
+	return false, fmt.Errorf("failed to check remote file %s after %d attempts: %w",
+		remotePath, maxRetries, lastErr)
+}
+
+// checkFileExistsOnce performs a single attempt to check if a file exists
+func (a *bmcAdapter) checkFileExistsOnce(remotePath string) (bool, error) {
 	// Use 'ls' and check exit code / stderr
 	cmdStr := fmt.Sprintf("ls %s 2>&1", remotePath)
-	stdout, _, err := a.ExecuteCommand(cmdStr)
+	stdout, _, err := a.executeCommandOnce(cmdStr)
 
 	if err == nil {
 		log.Printf("[BMC SSH LS] File %s exists.", remotePath)
@@ -119,6 +203,46 @@ func (a *bmcAdapter) CheckFileExists(remotePath string) (bool, error) {
 
 // UploadFile implements BMCAdapter.UploadFile.
 func (a *bmcAdapter) UploadFile(localPath, remotePath string) error {
+	const maxRetries = 3
+	const retryDelay = 5 * time.Second
+
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			log.Printf("[BMC SCP UPLOAD] Retry attempt %d/%d after waiting %v...",
+				attempt, maxRetries, retryDelay)
+			time.Sleep(retryDelay)
+		}
+
+		err := a.uploadFileOnce(localPath, remotePath)
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("[BMC SCP UPLOAD] Successfully uploaded file on retry attempt %d", attempt)
+			}
+			return nil
+		}
+
+		lastErr = err
+		log.Printf("[BMC SCP UPLOAD] Attempt %d failed: %v", attempt, err)
+
+		// Check if it's a network timeout error
+		if strings.Contains(err.Error(), "i/o timeout") ||
+			strings.Contains(err.Error(), "connection refused") ||
+			strings.Contains(err.Error(), "no route to host") {
+			log.Printf("[BMC SCP UPLOAD] Network issue detected, will retry...")
+			continue
+		}
+
+		// If it's not a network error, don't retry
+		log.Printf("[BMC SCP UPLOAD] Error doesn't seem to be network-related, won't retry")
+		break
+	}
+
+	return fmt.Errorf("failed to upload file after %d attempts: %w", maxRetries, lastErr)
+}
+
+// uploadFileOnce performs a single attempt to upload a file
+func (a *bmcAdapter) uploadFileOnce(localPath, remotePath string) error {
 	sshConfig, err := getSSHClientConfig(a.config)
 	if err != nil {
 		return fmt.Errorf("invalid SSH config: %w", err)
