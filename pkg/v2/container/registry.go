@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,78 +52,121 @@ func setupSignalHandlers() {
 	// Register for common termination signals
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	// Handle signals in a goroutine
+	// Handle signals in a continuously running goroutine
 	go func() {
-		sig := <-sigCh
-		fmt.Printf("\nReceived signal %v, cleaning up containers before exit...\n", sig)
+		for {
+			sig := <-sigCh
+			fmt.Printf("\nReceived signal %v, cleaning up containers before exit...\n", sig)
 
-		// Clean up all containers
-		globalRegistryLock.Lock()
-		registry := globalRegistry
-		globalRegistryLock.Unlock()
+			// Clean up all containers - keep this lock as short as possible
+			globalRegistryLock.Lock()
+			registry := globalRegistry
+			globalRegistryLock.Unlock()
 
-		if registry != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			// Get a list of container IDs before attempting removal
-			containerIDs := make([]string, 0)
-			registry.mu.RLock()
-			for id := range registry.containers {
-				containerIDs = append(containerIDs, id)
-			}
-			registry.mu.RUnlock()
-
-			// Try to clean up using the registry
-			err := registry.RemoveAll(ctx)
-
-			// If registry cleanup fails or to be extra thorough, try direct Docker CLI commands
-			// to forcefully remove containers created by our tests
-			if err != nil || len(containerIDs) > 0 {
-				fmt.Println("Performing additional container cleanup via Docker CLI...")
-
-				// First try with the specific container IDs we know about
-				for _, id := range containerIDs {
-					fmt.Printf("Force removing container %s\n", id)
-					killCmd := exec.Command("docker", "rm", "-f", id)
-					killCmd.Run() // Ignore errors, just try our best
+			if registry != nil {
+				// Collect container IDs under read lock
+				registry.mu.RLock()
+				containerIDs := make([]string, 0, len(registry.containers))
+				for id := range registry.containers {
+					containerIDs = append(containerIDs, id)
 				}
+				registry.mu.RUnlock()
 
-				// Also try to remove any containers with our test prefix
-				cleanCmd := exec.Command("docker", "ps", "-a", "-q", "--filter", "name=turingpi-test-")
-				output, err := cleanCmd.Output()
-				if err == nil && len(output) > 0 {
-					containerList := strings.Split(strings.TrimSpace(string(output)), "\n")
-					for _, id := range containerList {
-						if id != "" {
-							fmt.Printf("Force removing container %s\n", id)
-							rmCmd := exec.Command("docker", "rm", "-f", id)
-							rmCmd.Run() // Ignore errors
-						}
+				// Run direct Docker cleanup first for immediate action
+				if len(containerIDs) > 0 {
+					fmt.Printf("Force removing %d direct containers\n", len(containerIDs))
+					for _, id := range containerIDs {
+						// Use force flag to ensure immediate cleanup
+						killCmd := exec.Command("docker", "rm", "-f", id)
+						killCmd.Run() // Ignore errors
 					}
 				}
+
+				// Also do registry cleanup with timeout
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = registry.RemoveAll(ctx)
+				cancel()
+
+				// Also clean up test containers by pattern as a final measure
+				cleanupTestContainers()
+
+				// Make sure the registry now has no containers
+				registry.mu.Lock()
+				registry.containers = make(map[string]*DockerContainer)
+				registry.mu.Unlock()
 			}
 
-			fmt.Println("All containers successfully cleaned up")
-		}
+			fmt.Println("Container cleanup complete")
 
-		// Wait a moment to make sure cleanup operations complete
-		time.Sleep(500 * time.Millisecond)
+			// For interruption-type signals, potentially exit after cleanup
+			if sig == syscall.SIGINT || sig == syscall.SIGTERM {
+				// Kill any containers matching our patterns one last time before exiting
+				if killAllCmd := exec.Command("bash", "-c",
+					"docker ps -a -q --filter \"name=turingpi-test-\" | xargs -r docker rm -f"); killAllCmd.Run() != nil {
+					// If the bash command fails, try direct docker ps
+					cleanupTestContainers()
+				}
 
-		// Re-raise the signal after cleanup to allow normal termination
-		if sig == syscall.SIGINT || sig == syscall.SIGTERM {
-			// Reset the handler to default
-			signal.Reset(sig)
-			// Re-raise the signal
-			p, err := os.FindProcess(os.Getpid())
-			if err == nil {
-				p.Signal(sig)
+				// Exit directly without re-raising the signal to prevent partial test executions
+				fmt.Println("Exiting after cleanup...")
+				os.Exit(130) // Standard exit code for SIGINT
+				return
 			}
 		}
 	}()
 
+	// Also register a cleanup function that runs on normal exit
+	runtime.SetFinalizer(&finalizerObject, func(_ *int) {
+		cleanup()
+	})
+
 	signalSetup = true
 	fmt.Println("Signal handlers set up for container cleanup")
+}
+
+// cleanupTestContainers forcibly removes all test containers via Docker CLI
+// This is a fallback mechanism when the standard cleanup fails
+func cleanupTestContainers() {
+	// Test container name patterns to look for
+	testPrefixes := []string{
+		"turingpi-test-",
+		"test-registry-", // Used in registry tests
+		"registry-test-", // Used in other registry tests
+		"test-docker-",   // Used in Docker adapter tests
+	}
+
+	for _, prefix := range testPrefixes {
+		// Find all containers with this prefix
+		cleanCmd := exec.Command("docker", "ps", "-a", "-q", "--filter", fmt.Sprintf("name=%s", prefix))
+		output, err := cleanCmd.Output()
+		if err == nil && len(output) > 0 {
+			containerList := strings.Split(strings.TrimSpace(string(output)), "\n")
+			for _, id := range containerList {
+				if id != "" {
+					fmt.Printf("Force removing container %s (matched prefix %s)\n", id, prefix)
+					rmCmd := exec.Command("docker", "rm", "-f", id)
+					rmCmd.Run() // Ignore errors
+				}
+			}
+		}
+	}
+}
+
+// cleanup is called when the program exits
+func cleanup() {
+	fmt.Println("Running final container cleanup...")
+	globalRegistryLock.Lock()
+	registry := globalRegistry
+	globalRegistryLock.Unlock()
+
+	if registry != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = registry.RemoveAll(ctx)
+	}
+
+	// Also run the direct Docker CLI cleanup as a final fallback
+	cleanupTestContainers()
 }
 
 // getDockerContextDetails gets detailed information about the current Docker context
@@ -427,3 +471,11 @@ func (r *DockerRegistry) RegisterExistingContainer(ctx context.Context, id strin
 	fmt.Printf("Registered existing container %s with registry\n", id)
 	return container, nil
 }
+
+// CleanupContainers is a public function that can be called to force cleanup
+func CleanupContainers() {
+	cleanupTestContainers()
+}
+
+// Global variable used as finalizer object
+var finalizerObject = new(int)

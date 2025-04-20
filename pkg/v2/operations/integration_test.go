@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -104,8 +106,20 @@ func setupExecutor(t *testing.T) (CommandExecutor, func(), error) {
 		return nil, nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
-	// Create a unique container name with timestamp
-	containerName := fmt.Sprintf("turingpi-test-%d", time.Now().UnixNano())
+	// Create a unique container name with timestamp and test name - use shortened timestamp for readability
+	testName := strings.ReplaceAll(t.Name(), "/", "-")
+	testName = strings.ReplaceAll(testName, " ", "_")
+	containerName := fmt.Sprintf("turingpi-test-%s-%d", testName, time.Now().Unix())
+
+	// Enforce a maximum container name length (Docker has a limit)
+	if len(containerName) > 63 {
+		containerName = containerName[:63]
+	}
+
+	t.Logf("Creating test container: %s", containerName)
+
+	// Get test ID to embed in environment variable for easier tracking
+	testID := fmt.Sprintf("%s-%d", t.Name(), time.Now().UnixNano())
 
 	// Config for Docker container
 	config := &platform.DockerExecutionConfig{
@@ -116,8 +130,55 @@ func setupExecutor(t *testing.T) (CommandExecutor, func(), error) {
 		SourceDir:     tempDir,
 	}
 
-	// Get the registry to track containers
-	registry, registryErr := container.NewDockerRegistry()
+	// Set up variables to track if this container was already cleaned up
+	var cleanedUp bool
+	var cleanupMutex sync.Mutex
+
+	// Create a more aggressive direct cleanup function that will
+	// run as soon as possible when signaled
+	containerCleanupFunc := func(containerID string) {
+		cleanupMutex.Lock()
+		defer cleanupMutex.Unlock()
+
+		if cleanedUp {
+			return
+		}
+
+		cleanedUp = true
+
+		if containerID != "" {
+			// First try direct Docker CLI cleanup as it's fastest
+			removeCmd := exec.Command("docker", "rm", "-f", containerID)
+			_ = removeCmd.Run() // Ignore errors
+
+			// Wait a moment for Docker to process the removal
+			time.Sleep(200 * time.Millisecond)
+
+			// Double-check removal
+			checkCmd := exec.Command("docker", "ps", "-a", "-q", "--filter", fmt.Sprintf("id=%s", containerID))
+			output, _ := checkCmd.Output()
+			if len(output) > 0 {
+				// If container still exists, try again
+				retryCmd := exec.Command("docker", "rm", "-f", containerID)
+				_ = retryCmd.Run()
+			}
+		}
+
+		// Clean up temp directory
+		os.RemoveAll(tempDir)
+	}
+
+	// Get the registry to track containers - retry a few times if it fails
+	var registry container.Registry
+	var registryErr error
+	for attempts := 0; attempts < 3; attempts++ {
+		registry, registryErr = container.NewDockerRegistry()
+		if registryErr == nil {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+
 	if registryErr != nil {
 		t.Logf("Warning: Failed to get Docker registry for cleanup tracking: %v", registryErr)
 	}
@@ -129,27 +190,46 @@ func setupExecutor(t *testing.T) (CommandExecutor, func(), error) {
 		return nil, nil, fmt.Errorf("failed to create docker adapter: %w", err)
 	}
 
-	// Create cleanup function
+	// Register a finalizer for this test to ensure container cleanup
+	runtime.SetFinalizer(t, func(t *testing.T) {
+		containerCleanupFunc(dockerAdapter.GetContainerID())
+	})
+
+	// Create cleanup function that ensures container is removed
 	cleanup := func() {
 		t.Logf("Cleaning up Docker container: %s", containerName)
+
+		// Get container ID before adapter cleanup
+		containerID := dockerAdapter.GetContainerID()
+
+		// Use our direct cleanup
+		containerCleanupFunc(containerID)
+
+		// Then use the adapter's cleanup
 		dockerAdapter.Cleanup()
-		os.RemoveAll(tempDir)
 	}
 
 	// Register container with registry if available
 	if registry != nil && dockerAdapter.GetContainerID() != "" {
 		ctx := context.Background()
-		t.Logf("Registering container %s with registry for cleanup tracking", dockerAdapter.GetContainerID())
+		t.Logf("Registering container %s (%s) with registry for cleanup tracking",
+			dockerAdapter.GetContainerID(), containerName)
 
-		// Create a minimal container config for registration
+		// Create a container config for registration
 		containerConfig := container.ContainerConfig{
 			Name:  containerName,
 			Image: "ubuntu:latest",
+			Env: map[string]string{
+				"TURINGPI_TEST_ID": testID,
+				"TURINGPI_TEST":    "true",
+			},
 		}
 
 		// Since the container is already created, we just need to register it
-		// This is a workaround since we don't have direct access to register existing containers
-		registry.RegisterExistingContainer(ctx, dockerAdapter.GetContainerID(), containerConfig)
+		_, regErr := registry.RegisterExistingContainer(ctx, dockerAdapter.GetContainerID(), containerConfig)
+		if regErr != nil {
+			t.Logf("Warning: Failed to register container with registry: %v", regErr)
+		}
 	}
 
 	// Create our adapter to make it implement CommandExecutor
