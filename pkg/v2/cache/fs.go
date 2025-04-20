@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -266,15 +267,16 @@ func (c *FSCache) Delete(ctx context.Context, key string) error {
 	default:
 	}
 
-	// Remove content and metadata files
-	contentPath := c.getContentPath(key)
+	// Remove both metadata and content files
 	metadataPath := c.getMetadataPath(key)
+	contentPath := c.getContentPath(key)
+
+	if err := os.Remove(metadataPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove metadata file: %w", err)
+	}
 
 	if err := os.Remove(contentPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove content file: %w", err)
-	}
-	if err := os.Remove(metadataPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove metadata file: %w", err)
 	}
 
 	// Update index
@@ -310,43 +312,51 @@ func (c *FSCache) RebuildIndex(ctx context.Context) error {
 	default:
 	}
 
-	// Create new empty index
 	newIndex := NewIndex()
 
-	// Walk through all .meta files in the cache directory
+	// Walk through all directories recursively
 	err := filepath.Walk(c.baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip directories and non-metadata files
-		if info.IsDir() || !strings.HasSuffix(path, ".meta") {
+		// Skip directories
+		if info.IsDir() {
 			return nil
 		}
 
-		// Extract key from filename
-		key := strings.TrimSuffix(filepath.Base(path), ".meta")
+		// Only process .meta files
+		if filepath.Ext(path) == ".meta" {
+			// Get relative path from base directory
+			relPath, err := filepath.Rel(c.baseDir, path)
+			if err != nil {
+				return fmt.Errorf("failed to get relative path: %w", err)
+			}
 
-		// Read and parse metadata
-		metadataFile, err := os.Open(path)
-		if err != nil {
-			return nil // Skip invalid files
+			// Extract key by removing .meta extension and converting to cache key format
+			key := strings.TrimSuffix(relPath, ".meta")
+
+			// Read metadata file directly instead of using Stat to avoid lock contention
+			metadataFile, err := os.Open(path)
+			if err != nil {
+				return nil // Skip invalid entries
+			}
+			defer metadataFile.Close()
+
+			var metadata Metadata
+			if err := json.NewDecoder(metadataFile).Decode(&metadata); err != nil {
+				return nil // Skip invalid entries
+			}
+
+			metadata.Key = key
+			newIndex.updateIndex(&metadata)
 		}
-		defer metadataFile.Close()
-
-		var metadata Metadata
-		if err := json.NewDecoder(metadataFile).Decode(&metadata); err != nil {
-			return nil // Skip invalid files
-		}
-
-		metadata.Key = key
-		newIndex.updateIndex(&metadata)
 
 		return nil
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to rebuild index: %w", err)
+		return fmt.Errorf("failed to walk cache directory: %w", err)
 	}
 
 	c.index = newIndex
@@ -363,59 +373,82 @@ func (c *FSCache) Cleanup(ctx context.Context, recursive bool) (int, error) {
 	default:
 	}
 
-	cleaned := 0
-	err := filepath.Walk(c.baseDir, func(path string, info os.FileInfo, err error) error {
+	cleanedCount := 0
+	var emptyDirs []string
+
+	walkFn := func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
+		// Skip directories unless recursive is true
 		if info.IsDir() {
-			if path == c.baseDir {
-				return nil
-			}
-			if !recursive {
+			if !recursive && path != c.baseDir {
 				return filepath.SkipDir
 			}
+			// Store directory for later empty check
+			if path != c.baseDir {
+				emptyDirs = append(emptyDirs, path)
+			}
 			return nil
 		}
 
-		base := filepath.Base(path)
-		if !strings.HasSuffix(base, ".meta") && !strings.HasSuffix(base, ".data") {
-			return nil
-		}
-
-		key := strings.TrimSuffix(base, filepath.Ext(base))
-		metaPath := c.getMetadataPath(key)
-		dataPath := c.getContentPath(key)
-
-		metaExists := fileExists(metaPath)
-		dataExists := fileExists(dataPath)
-
-		if strings.HasSuffix(base, ".meta") && !dataExists {
-			if err := os.Remove(path); err != nil {
-				return err
+		// Process only .data files
+		if filepath.Ext(path) == ".data" {
+			// Check if corresponding .meta file exists
+			metaPath := strings.TrimSuffix(path, ".data") + ".meta"
+			if _, err := os.Stat(metaPath); os.IsNotExist(err) {
+				// No metadata file exists, remove the orphaned data file
+				if err := os.Remove(path); err != nil {
+					return fmt.Errorf("failed to remove orphaned file %s: %w", path, err)
+				}
+				cleanedCount++
 			}
-			cleaned++
-		} else if strings.HasSuffix(base, ".data") && !metaExists {
-			if err := os.Remove(path); err != nil {
-				return err
-			}
-			cleaned++
 		}
 
 		return nil
-	})
-
-	if err != nil {
-		return cleaned, fmt.Errorf("cleanup failed: %w", err)
 	}
 
-	return cleaned, nil
+	err := filepath.Walk(c.baseDir, walkFn)
+	if err != nil {
+		return cleanedCount, fmt.Errorf("cleanup walk failed: %w", err)
+	}
+
+	// Clean up empty directories from deepest to shallowest
+	if recursive {
+		// Sort directories by depth (deepest first)
+		sort.Slice(emptyDirs, func(i, j int) bool {
+			return len(strings.Split(emptyDirs[i], string(os.PathSeparator))) > len(strings.Split(emptyDirs[j], string(os.PathSeparator)))
+		})
+
+		for _, dir := range emptyDirs {
+			// Check if directory is empty
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				continue // Skip if can't read directory
+			}
+			if len(entries) == 0 {
+				if err := os.Remove(dir); err != nil {
+					continue // Skip if can't remove directory
+				}
+				cleanedCount++
+			}
+		}
+	}
+
+	return cleanedCount, nil
+}
+
+func (c *FSCache) Close() error {
+	if c.indexMgr != nil {
+		c.indexMgr.Stop()
+	}
+	return nil
 }
 
 func (c *FSCache) VerifyIntegrity(ctx context.Context) ([]string, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
@@ -425,6 +458,7 @@ func (c *FSCache) VerifyIntegrity(ctx context.Context) ([]string, error) {
 
 	var issues []string
 
+	// Walk through all files in the cache directory
 	err := filepath.Walk(c.baseDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -434,76 +468,70 @@ func (c *FSCache) VerifyIntegrity(ctx context.Context) ([]string, error) {
 			return nil
 		}
 
-		base := filepath.Base(path)
-		if !strings.HasSuffix(base, ".meta") && !strings.HasSuffix(base, ".data") {
-			return nil
+		relPath, err := filepath.Rel(c.baseDir, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
 		}
 
-		key := strings.TrimSuffix(base, filepath.Ext(base))
-		metaPath := c.getMetadataPath(key)
-		dataPath := c.getContentPath(key)
+		ext := filepath.Ext(path)
+		switch ext {
+		case ".meta":
+			// Check if corresponding .data file exists
+			dataPath := strings.TrimSuffix(path, ".meta") + ".data"
+			if _, err := os.Stat(dataPath); os.IsNotExist(err) {
+				issues = append(issues, fmt.Sprintf("orphaned metadata file: %s (no corresponding .data file)", relPath))
+				return nil
+			}
 
-		metaExists := fileExists(metaPath)
-		dataExists := fileExists(dataPath)
+			// Check if metadata is valid
+			metadataFile, err := os.Open(path)
+			if err != nil {
+				issues = append(issues, fmt.Sprintf("failed to open metadata file: %s: %v", relPath, err))
+				return nil
+			}
+			defer metadataFile.Close()
 
-		if strings.HasSuffix(base, ".meta") {
-			if !dataExists {
-				issues = append(issues, fmt.Sprintf("Orphaned metadata file: %s", path))
-			} else {
-				// Verify metadata content
-				if metadata, err := c.Stat(ctx, key); err != nil {
-					issues = append(issues, fmt.Sprintf("Invalid metadata file: %s - %v", path, err))
-				} else if metadata.Hash != "" {
-					// Verify content hash if available
-					if hash, err := calculateFileHash(dataPath); err != nil {
-						issues = append(issues, fmt.Sprintf("Failed to verify content hash: %s - %v", dataPath, err))
-					} else if hash != metadata.Hash {
-						issues = append(issues, fmt.Sprintf("Content hash mismatch: %s", dataPath))
-					}
+			var metadata Metadata
+			if err := json.NewDecoder(metadataFile).Decode(&metadata); err != nil {
+				issues = append(issues, fmt.Sprintf("corrupted metadata file: %s: %v", relPath, err))
+				return nil
+			}
+
+			// If hash is present, verify it
+			if metadata.Hash != "" {
+				dataFile, err := os.Open(dataPath)
+				if err != nil {
+					issues = append(issues, fmt.Sprintf("failed to open data file for hash verification: %s: %v", strings.TrimSuffix(relPath, ".meta")+".data", err))
+					return nil
+				}
+				defer dataFile.Close()
+
+				hash := sha256.New()
+				if _, err := io.Copy(hash, dataFile); err != nil {
+					issues = append(issues, fmt.Sprintf("failed to read data file for hash verification: %s: %v", strings.TrimSuffix(relPath, ".meta")+".data", err))
+					return nil
+				}
+
+				computedHash := hex.EncodeToString(hash.Sum(nil))
+				if computedHash != metadata.Hash {
+					issues = append(issues, fmt.Sprintf("hash mismatch for %s: stored=%s computed=%s", strings.TrimSuffix(relPath, ".meta"), metadata.Hash, computedHash))
 				}
 			}
-		} else if strings.HasSuffix(base, ".data") && !metaExists {
-			issues = append(issues, fmt.Sprintf("Orphaned data file: %s", path))
+
+		case ".data":
+			// Check if corresponding .meta file exists
+			metaPath := strings.TrimSuffix(path, ".data") + ".meta"
+			if _, err := os.Stat(metaPath); os.IsNotExist(err) {
+				issues = append(issues, fmt.Sprintf("orphaned data file: %s (no corresponding .meta file)", relPath))
+			}
 		}
 
 		return nil
 	})
 
 	if err != nil {
-		return issues, fmt.Errorf("integrity check failed: %w", err)
+		return issues, fmt.Errorf("integrity check walk failed: %w", err)
 	}
 
 	return issues, nil
-}
-
-func (c *FSCache) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.indexMgr != nil {
-		c.indexMgr.Stop()
-	}
-	return nil
-}
-
-// Helper functions
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func calculateFileHash(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }

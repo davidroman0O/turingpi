@@ -2,8 +2,8 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 
 	imageops "github.com/davidroman0O/turingpi/pkg/v2/image"
@@ -15,116 +15,16 @@ type ImageToolImpl struct {
 	imgOps        imageops.ImageOps
 }
 
-// MockImageOps is a complete mock implementation of the ImageOps interface
-type MockImageOps struct {
-	// We embed the ImageOpsImpl to get any existing implementations
-	*imageops.ImageOpsImpl
-}
-
-// Ensure MockImageOps implements the ImageOps interface
-var _ imageops.ImageOps = (*MockImageOps)(nil)
-
-// PrepareImage implements ImageOps
-func (m *MockImageOps) PrepareImage(ctx context.Context, opts imageops.PrepareImageOptions) error {
-	return fmt.Errorf("PrepareImage not implemented")
-}
-
-// ExecuteFileOperations implements ImageOps
-func (m *MockImageOps) ExecuteFileOperations(ctx context.Context, params imageops.ExecuteParams) error {
-	return fmt.Errorf("ExecuteFileOperations not implemented")
-}
-
-// MapPartitions implements ImageOps
-func (m *MockImageOps) MapPartitions(ctx context.Context, imgPathAbs string) (string, error) {
-	return "", fmt.Errorf("MapPartitions not implemented")
-}
-
-// CleanupPartitions implements ImageOps
-func (m *MockImageOps) CleanupPartitions(ctx context.Context, imgPathAbs string) error {
-	return fmt.Errorf("CleanupPartitions not implemented")
-}
-
-// MountFilesystem implements ImageOps
-func (m *MockImageOps) MountFilesystem(ctx context.Context, partitionDevice, mountDir string) error {
-	return fmt.Errorf("MountFilesystem not implemented")
-}
-
-// UnmountFilesystem implements ImageOps
-func (m *MockImageOps) UnmountFilesystem(ctx context.Context, mountDir string) error {
-	return fmt.Errorf("UnmountFilesystem not implemented")
-}
-
-// ApplyNetworkConfig implements ImageOps
-func (m *MockImageOps) ApplyNetworkConfig(ctx context.Context, mountDir string, hostname string, ipCIDR string, gateway string, dnsServers []string) error {
-	return fmt.Errorf("ApplyNetworkConfig not implemented")
-}
-
-// DecompressImageXZ implements ImageOps
-func (m *MockImageOps) DecompressImageXZ(ctx context.Context, sourceImgXZAbs, tmpDir string) (string, error) {
-	return "", fmt.Errorf("DecompressImageXZ not implemented")
-}
-
-// RecompressImageXZ implements ImageOps
-func (m *MockImageOps) RecompressImageXZ(ctx context.Context, modifiedImgPath, finalXZPath string) error {
-	return fmt.Errorf("RecompressImageXZ not implemented")
-}
-
-// WriteToImageFile implements ImageOps
-func (m *MockImageOps) WriteToImageFile(ctx context.Context, mountDir, relativePath string, content []byte, perm fs.FileMode) error {
-	if m.ImageOpsImpl != nil {
-		return m.ImageOpsImpl.WriteToFile(mountDir, relativePath, content, perm)
-	}
-	return fmt.Errorf("WriteToImageFile not implemented")
-}
-
-// CopyFileToImage implements ImageOps
-func (m *MockImageOps) CopyFileToImage(ctx context.Context, mountDir, localSourcePath, relativeDestPath string) error {
-	if m.ImageOpsImpl != nil {
-		return m.ImageOpsImpl.CopyFile(mountDir, localSourcePath, relativeDestPath)
-	}
-	return fmt.Errorf("CopyFileToImage not implemented")
-}
-
-// MkdirInImage implements ImageOps
-func (m *MockImageOps) MkdirInImage(ctx context.Context, mountDir, relativePath string, perm fs.FileMode) error {
-	if m.ImageOpsImpl != nil {
-		return m.ImageOpsImpl.MakeDirectory(mountDir, relativePath, perm)
-	}
-	return fmt.Errorf("MkdirInImage not implemented")
-}
-
-// ChmodInImage implements ImageOps
-func (m *MockImageOps) ChmodInImage(ctx context.Context, mountDir, relativePath string, perm fs.FileMode) error {
-	if m.ImageOpsImpl != nil {
-		return m.ImageOpsImpl.ChangePermissions(mountDir, relativePath, perm)
-	}
-	return fmt.Errorf("ChmodInImage not implemented")
-}
-
-// Close implements ImageOps
-func (m *MockImageOps) Close() error {
-	return nil
-}
-
 // NewImageTool creates a new ImageTool
 func NewImageTool(containerTool ContainerTool) ImageTool {
 	return &ImageToolImpl{
 		containerTool: containerTool,
-		imgOps:        &MockImageOps{&imageops.ImageOpsImpl{}},
+		imgOps:        &imageops.ImageOpsImpl{},
 	}
 }
 
 // PrepareImage prepares an image with the given options
 func (t *ImageToolImpl) PrepareImage(ctx context.Context, opts imageops.PrepareImageOptions) error {
-	// If we have a container tool, we can run the operations in a container
-	// Otherwise, fall back to direct operations
-	if t.containerTool != nil {
-		// Implementation would create a container and run the operation there
-		// This is just a placeholder
-		return nil
-	}
-
-	// Direct implementation
 	return t.imgOps.PrepareImage(ctx, opts)
 }
 
@@ -149,8 +49,8 @@ func (t *ImageToolImpl) UnmountFilesystem(ctx context.Context, mountDir string) 
 }
 
 // DecompressImageXZ decompresses an XZ-compressed disk image
-func (t *ImageToolImpl) DecompressImageXZ(ctx context.Context, sourceXZ, targetImg string) (string, error) {
-	return t.imgOps.DecompressImageXZ(ctx, sourceXZ, filepath.Dir(targetImg))
+func (t *ImageToolImpl) DecompressImageXZ(ctx context.Context, sourceXZ, targetDir string) (string, error) {
+	return t.imgOps.DecompressImageXZ(ctx, sourceXZ, targetDir)
 }
 
 // CompressImageXZ compresses a disk image with XZ
@@ -166,4 +66,11 @@ func (t *ImageToolImpl) WriteFile(ctx context.Context, mountDir, relativePath st
 // CopyFile copies a file to the mounted image
 func (t *ImageToolImpl) CopyFile(ctx context.Context, mountDir, sourcePath, destPath string) error {
 	return t.imgOps.CopyFileToImage(ctx, mountDir, sourcePath, destPath)
+}
+
+// ReadFile reads a file from the mounted image
+func (t *ImageToolImpl) ReadFile(ctx context.Context, mountDir, relativePath string) ([]byte, error) {
+	// Use standard file system operations - this is not directly part of the ImageOps interface
+	fullPath := filepath.Join(mountDir, relativePath)
+	return os.ReadFile(fullPath)
 }

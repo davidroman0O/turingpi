@@ -15,12 +15,15 @@ type Metadata struct {
 	ModTime     time.Time
 	Hash        string            // Optional SHA256
 	Tags        map[string]string // User-defined tags
+	OSType      string
+	OSVersion   string
 }
 
 // Index represents the in-memory index of cached items
 type Index struct {
 	Items     map[string]*Metadata           // Key -> Metadata mapping
 	TagIndex  map[string]map[string][]string // TagKey -> TagValue -> []Key mapping
+	OSIndex   map[string]map[string][]string // OSType -> OSVersion -> []Key mapping
 	UpdatedAt time.Time
 }
 
@@ -29,6 +32,7 @@ func NewIndex() *Index {
 	return &Index{
 		Items:     make(map[string]*Metadata),
 		TagIndex:  make(map[string]map[string][]string),
+		OSIndex:   make(map[string]map[string][]string),
 		UpdatedAt: time.Now(),
 	}
 }
@@ -57,18 +61,23 @@ type Cache interface {
 	// Location returns the base location of the cache (e.g., directory path or remote URL)
 	Location() string
 
-	// GetIndex returns the current cache index
+	// Index returns the current cache index
 	GetIndex(ctx context.Context) (*Index, error)
 
 	// RebuildIndex forces a rebuild of the cache index
 	RebuildIndex(ctx context.Context) error
 
-	// Cleanup removes orphaned files and optionally performs deep cleanup
+	// Cleanup removes orphaned files and optionally performs deep cleanup of nested directories
 	// Returns the number of cleaned files and any error encountered
 	Cleanup(ctx context.Context, recursive bool) (int, error)
 
 	// VerifyIntegrity checks the cache for inconsistencies
 	// Returns a list of issues found and any error encountered
+	// Issues can include:
+	// - Orphaned .data files (no corresponding .meta)
+	// - Orphaned .meta files (no corresponding .data)
+	// - Corrupted metadata files
+	// - Hash mismatches between stored and computed values
 	VerifyIntegrity(ctx context.Context) ([]string, error)
 
 	// Close releases any resources used by the cache
@@ -115,6 +124,7 @@ func (im *IndexManager) Start(ctx context.Context) error {
 			case <-im.indexChan:
 				if err := im.cache.RebuildIndex(ctx); err != nil {
 					// Log error but continue
+					// TODO: Add proper logging
 					_ = err
 				}
 			}
@@ -154,6 +164,20 @@ func (idx *Index) updateIndex(metadata *Metadata) {
 		idx.TagIndex[tagKey][tagValue] = append(idx.TagIndex[tagKey][tagValue], metadata.Key)
 	}
 
+	// Update OS index
+	if metadata.OSType != "" {
+		if _, ok := idx.OSIndex[metadata.OSType]; !ok {
+			idx.OSIndex[metadata.OSType] = make(map[string][]string)
+		}
+		if _, ok := idx.OSIndex[metadata.OSType][metadata.OSVersion]; !ok {
+			idx.OSIndex[metadata.OSType][metadata.OSVersion] = []string{}
+		}
+		idx.OSIndex[metadata.OSType][metadata.OSVersion] = append(
+			idx.OSIndex[metadata.OSType][metadata.OSVersion],
+			metadata.Key,
+		)
+	}
+
 	idx.UpdatedAt = time.Now()
 }
 
@@ -175,6 +199,21 @@ func (idx *Index) removeFromIndex(key string) {
 					}
 				}
 				tagMap[tagValue] = newKeys
+			}
+		}
+	}
+
+	// Remove from OS index
+	if metadata.OSType != "" {
+		if osMap, ok := idx.OSIndex[metadata.OSType]; ok {
+			if keys, ok := osMap[metadata.OSVersion]; ok {
+				newKeys := make([]string, 0, len(keys)-1)
+				for _, k := range keys {
+					if k != key {
+						newKeys = append(newKeys, k)
+					}
+				}
+				osMap[metadata.OSVersion] = newKeys
 			}
 		}
 	}

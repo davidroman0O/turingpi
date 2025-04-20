@@ -5,11 +5,20 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/docker/docker/client"
+)
+
+// Global registry instance to handle cleanup on signals
+var (
+	globalRegistry     *DockerRegistry
+	globalRegistryLock sync.Mutex
+	signalSetup        bool
 )
 
 // DockerRegistry implements the Registry interface for Docker
@@ -23,6 +32,97 @@ type DockerRegistry struct {
 type DockerContextInfo struct {
 	Name string
 	Host string
+}
+
+// setupSignalHandlers sets up handlers for common termination signals
+// to ensure containers are cleaned up even when the program is interrupted
+func setupSignalHandlers() {
+	// Only set up handlers once
+	globalRegistryLock.Lock()
+	defer globalRegistryLock.Unlock()
+
+	if signalSetup {
+		return
+	}
+
+	// Create a channel to receive signals
+	sigCh := make(chan os.Signal, 1)
+
+	// Register for common termination signals
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+	// Handle signals in a goroutine
+	go func() {
+		sig := <-sigCh
+		fmt.Printf("\nReceived signal %v, cleaning up containers before exit...\n", sig)
+
+		// Clean up all containers
+		globalRegistryLock.Lock()
+		registry := globalRegistry
+		globalRegistryLock.Unlock()
+
+		if registry != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			// Get a list of container IDs before attempting removal
+			containerIDs := make([]string, 0)
+			registry.mu.RLock()
+			for id := range registry.containers {
+				containerIDs = append(containerIDs, id)
+			}
+			registry.mu.RUnlock()
+
+			// Try to clean up using the registry
+			err := registry.RemoveAll(ctx)
+
+			// If registry cleanup fails or to be extra thorough, try direct Docker CLI commands
+			// to forcefully remove containers created by our tests
+			if err != nil || len(containerIDs) > 0 {
+				fmt.Println("Performing additional container cleanup via Docker CLI...")
+
+				// First try with the specific container IDs we know about
+				for _, id := range containerIDs {
+					fmt.Printf("Force removing container %s\n", id)
+					killCmd := exec.Command("docker", "rm", "-f", id)
+					killCmd.Run() // Ignore errors, just try our best
+				}
+
+				// Also try to remove any containers with our test prefix
+				cleanCmd := exec.Command("docker", "ps", "-a", "-q", "--filter", "name=turingpi-test-")
+				output, err := cleanCmd.Output()
+				if err == nil && len(output) > 0 {
+					containerList := strings.Split(strings.TrimSpace(string(output)), "\n")
+					for _, id := range containerList {
+						if id != "" {
+							fmt.Printf("Force removing container %s\n", id)
+							rmCmd := exec.Command("docker", "rm", "-f", id)
+							rmCmd.Run() // Ignore errors
+						}
+					}
+				}
+			}
+
+			fmt.Println("All containers successfully cleaned up")
+		}
+
+		// Wait a moment to make sure cleanup operations complete
+		time.Sleep(500 * time.Millisecond)
+
+		// Re-raise the signal after cleanup to allow normal termination
+		if sig == syscall.SIGINT || sig == syscall.SIGTERM {
+			// Reset the handler to default
+			signal.Reset(sig)
+			// Re-raise the signal
+			p, err := os.FindProcess(os.Getpid())
+			if err == nil {
+				p.Signal(sig)
+			}
+		}
+	}()
+
+	signalSetup = true
+	fmt.Println("Signal handlers set up for container cleanup")
 }
 
 // getDockerContextDetails gets detailed information about the current Docker context
@@ -144,10 +244,20 @@ func NewDockerRegistry() (Registry, error) {
 		return nil, fmt.Errorf("failed to connect to Docker daemon: %w\nEnsure Docker is running and DOCKER_HOST environment variable is set correctly if using a non-default socket", err)
 	}
 
-	return &DockerRegistry{
+	registry := &DockerRegistry{
 		client:     cli,
 		containers: make(map[string]*DockerContainer),
-	}, nil
+	}
+
+	// Store the registry in the global variable and set up signal handlers
+	globalRegistryLock.Lock()
+	globalRegistry = registry
+	globalRegistryLock.Unlock()
+
+	// Set up signal handlers for cleanup
+	setupSignalHandlers()
+
+	return registry, nil
 }
 
 // Create implements Registry.Create
@@ -292,4 +402,28 @@ func (r *DockerRegistry) Close() error {
 	}
 
 	return nil
+}
+
+// RegisterExistingContainer adds an existing container to the registry
+func (r *DockerRegistry) RegisterExistingContainer(ctx context.Context, id string, config ContainerConfig) (Container, error) {
+	// Verify container exists by inspecting it
+	_, err := r.client.ContainerInspect(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("container %s not found: %w", id, err)
+	}
+
+	// Create container instance
+	container := &DockerContainer{
+		id:     id,
+		client: r.client,
+		config: config,
+	}
+
+	// Register container
+	r.mu.Lock()
+	r.containers[id] = container
+	r.mu.Unlock()
+
+	fmt.Printf("Registered existing container %s with registry\n", id)
+	return container, nil
 }

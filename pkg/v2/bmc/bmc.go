@@ -6,33 +6,6 @@ import (
 	"strings"
 )
 
-// BMC defines the interface for interacting with the Board Management Controller
-type BMC interface {
-	// GetPowerStatus retrieves the power status of a specific node
-	GetPowerStatus(ctx context.Context, nodeID int) (*PowerStatus, error)
-
-	// PowerOn turns on a specific node
-	PowerOn(ctx context.Context, nodeID int) error
-
-	// PowerOff turns off a specific node
-	PowerOff(ctx context.Context, nodeID int) error
-
-	// Reset performs a hard reset on a specific node
-	Reset(ctx context.Context, nodeID int) error
-
-	// GetInfo retrieves information about the BMC
-	GetInfo(ctx context.Context) (*BMCInfo, error)
-
-	// Reboot reboots the BMC chip
-	Reboot(ctx context.Context) error
-
-	// UpdateFirmware updates the BMC firmware
-	UpdateFirmware(ctx context.Context, firmwarePath string) error
-
-	// ExecuteCommand executes a BMC-specific command
-	ExecuteCommand(ctx context.Context, command string) (stdout string, stderr string, err error)
-}
-
 // bmcImpl implements the BMC interface
 type bmcImpl struct {
 	executor CommandExecutor

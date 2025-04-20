@@ -51,3 +51,8 @@ func (t *BMCToolImpl) Reboot(ctx context.Context) error {
 func (t *BMCToolImpl) UpdateFirmware(ctx context.Context, firmwarePath string) error {
 	return t.client.UpdateFirmware(ctx, firmwarePath)
 }
+
+// ExecuteCommand executes a BMC-specific command
+func (t *BMCToolImpl) ExecuteCommand(ctx context.Context, command string) (stdout string, stderr string, err error) {
+	return t.client.ExecuteCommand(ctx, command)
+}

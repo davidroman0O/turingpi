@@ -1,156 +1,147 @@
+// Package container provides a unified interface for container operations
 package container
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"github.com/davidroman0O/turingpi/pkg/tpi/platform"
+	"io"
+	"time"
 )
 
-// DockerAdapter provides compatibility with the old Docker container API
-type DockerAdapter struct {
-	registry  Registry
-	container Container
-	config    *platform.DockerExecutionConfig
+// ContainerConfig holds configuration for container creation
+type ContainerConfig struct {
+	// Image is the container image to use
+	Image string
+
+	// Name is the container name (optional)
+	Name string
+
+	// Command is the command to run in the container
+	Command []string
+
+	// Environment variables
+	Env map[string]string
+
+	// Volume mounts (host:container)
+	Mounts map[string]string
+
+	// Working directory in container
+	WorkDir string
+
+	// Network mode (host, bridge, none)
+	NetworkMode string
+
+	// Whether to run in privileged mode
+	Privileged bool
+
+	// Additional capabilities
+	Capabilities []string
+
+	// Resource limits
+	Resources ResourceLimits
 }
 
-// NewDockerAdapter creates a new adapter with the given configuration
-func NewDockerAdapter(config *platform.DockerExecutionConfig) (*DockerAdapter, error) {
-	registry, err := NewDockerRegistry()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Docker registry: %w", err)
-	}
+// ResourceLimits defines container resource constraints
+type ResourceLimits struct {
+	// CPU limits
+	CPUShares  int64
+	CPUQuota   int64
+	CPUPeriod  int64
+	CPUSetCPUs string
+	CPUSetMems string
 
-	// Convert config to new format
-	containerConfig := ContainerConfig{
-		Image:      config.DockerImage,
-		Name:       config.ContainerName,
-		Command:    []string{"sleep", "infinity"},
-		WorkDir:    "/workspace",
-		Privileged: true,
-		Capabilities: []string{
-			"SYS_ADMIN",
-			"MKNOD",
-		},
-		Mounts: map[string]string{
-			config.SourceDir: "/source:ro",
-			config.TempDir:   "/tmp",
-			config.OutputDir: "/output",
-		},
-	}
+	// Memory limits (in bytes)
+	Memory     int64
+	MemorySwap int64
 
-	// Add additional mounts
-	for hostPath, containerPath := range config.AdditionalMounts {
-		containerConfig.Mounts[hostPath] = containerPath
-	}
-
-	// Create container
-	ctx := context.Background()
-	container, err := registry.Create(ctx, containerConfig)
-	if err != nil {
-		registry.Close()
-		return nil, fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Start container
-	if err := container.Start(ctx); err != nil {
-		container.Cleanup(ctx)
-		registry.Close()
-		return nil, fmt.Errorf("failed to start container: %w", err)
-	}
-
-	return &DockerAdapter{
-		registry:  registry,
-		container: container,
-		config:    config,
-	}, nil
+	// IO limits
+	BlkioWeight uint16
 }
 
-// ExecuteCommand executes a command in the container and returns the output
-func (a *DockerAdapter) ExecuteCommand(cmd []string) (string, error) {
-	ctx := context.Background()
-	return a.container.Exec(ctx, cmd)
+// Container represents a running container instance
+type Container interface {
+	// ID returns the container ID
+	ID() string
+
+	// Start starts the container
+	Start(ctx context.Context) error
+
+	// Stop stops the container
+	Stop(ctx context.Context) error
+
+	// Kill forcefully stops the container
+	Kill(ctx context.Context) error
+
+	// Pause pauses the container
+	Pause(ctx context.Context) error
+
+	// Unpause unpauses the container
+	Unpause(ctx context.Context) error
+
+	// Exec executes a command in the container
+	Exec(ctx context.Context, cmd []string) (string, error)
+
+	// ExecDetached executes a command in the container without waiting for output
+	ExecDetached(ctx context.Context, cmd []string) error
+
+	// CopyTo copies a file/directory into the container
+	CopyTo(ctx context.Context, hostPath, containerPath string) error
+
+	// CopyFrom copies a file/directory from the container
+	CopyFrom(ctx context.Context, containerPath, hostPath string) error
+
+	// Logs returns container logs
+	Logs(ctx context.Context) (io.ReadCloser, error)
+
+	// Wait waits for the container to exit
+	Wait(ctx context.Context) (int, error)
+
+	// Cleanup removes the container and its resources
+	Cleanup(ctx context.Context) error
 }
 
-// CopyFileToContainer copies a file from the host to the container
-func (a *DockerAdapter) CopyFileToContainer(srcPath, destPath string) error {
-	ctx := context.Background()
-	return a.container.CopyTo(ctx, srcPath, destPath)
+// ContainerState represents the state of a container
+type ContainerState struct {
+	ID           string
+	Name         string
+	Image        string
+	Command      []string
+	Created      time.Time
+	Started      time.Time
+	Finished     time.Time
+	ExitCode     int
+	Status       string
+	Running      bool
+	Paused       bool
+	OOMKilled    bool
+	Dead         bool
+	Pid          int
+	Error        string
+	RestartCount int
 }
 
-// Cleanup removes the container and releases resources
-func (a *DockerAdapter) Cleanup() error {
-	// Get container ID for old API compatibility
-	containerID := a.container.ID()
+// Registry manages container lifecycle and tracking
+type Registry interface {
+	// Create creates a new container
+	Create(ctx context.Context, config ContainerConfig) (Container, error)
 
-	ctx := context.Background()
-	if err := a.container.Cleanup(ctx); err != nil {
-		return fmt.Errorf("failed to cleanup container: %w", err)
-	}
+	// Get returns a container by ID
+	Get(ctx context.Context, id string) (Container, error)
 
-	if err := a.registry.Close(); err != nil {
-		return fmt.Errorf("failed to close registry: %w", err)
-	}
+	// List returns all managed containers
+	List(ctx context.Context) ([]Container, error)
 
-	fmt.Printf("Container %s has been removed\n", containerID)
-	return nil
-}
+	// Remove removes a container
+	Remove(ctx context.Context, id string) error
 
-// GetContainerID returns the container ID
-func (a *DockerAdapter) GetContainerID() string {
-	return a.container.ID()
-}
+	// RemoveAll removes all managed containers
+	RemoveAll(ctx context.Context) error
 
-// GetContainerName returns the container name
-func (a *DockerAdapter) GetContainerName() string {
-	return a.config.ContainerName
-}
+	// Stats returns container statistics
+	Stats(ctx context.Context, id string) (*ContainerState, error)
 
-// ExecuteDetached executes a command in the container without waiting for output
-func (a *DockerAdapter) ExecuteDetached(cmd []string) error {
-	ctx := context.Background()
-	return a.container.ExecDetached(ctx, cmd)
-}
+	// RegisterExistingContainer registers an existing container with the registry
+	RegisterExistingContainer(ctx context.Context, id string, config ContainerConfig) (Container, error)
 
-// CopyDirectoryToContainer copies a directory from the host to the container
-func (a *DockerAdapter) CopyDirectoryToContainer(srcDir, destDir string) error {
-	ctx := context.Background()
-
-	// First make sure the destination directory exists in the container
-	if err := a.container.ExecDetached(ctx, []string{"mkdir", "-p", destDir}); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	// Walk through the directory and copy each file
-	// This is a simplified implementation
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip directories, they'll be created when copying files
-		if info.IsDir() {
-			return nil
-		}
-
-		// Calculate relative path
-		relPath, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return fmt.Errorf("failed to get relative path: %w", err)
-		}
-
-		// Create destination path
-		destPath := filepath.Join(destDir, relPath)
-
-		// Make sure parent directory exists
-		parentDir := filepath.Dir(destPath)
-		if err := a.container.ExecDetached(ctx, []string{"mkdir", "-p", parentDir}); err != nil {
-			return fmt.Errorf("failed to create parent directory %s: %w", parentDir, err)
-		}
-
-		// Copy file
-		return a.container.CopyTo(ctx, path, destPath)
-	})
+	// Close releases all resources and removes all containers
+	Close() error
 }
