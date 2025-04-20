@@ -231,6 +231,29 @@ func (f *FilesystemOperations) FileExists(mountDir, relativePath string) bool {
 	return err == nil
 }
 
+// CopyFile copies a file to a mounted filesystem
+func (f *FilesystemOperations) CopyFile(ctx context.Context, mountDir, sourcePath, destPath string) error {
+	// Ensure source file exists
+	if _, err := f.executor.Execute(ctx, "test", "-f", sourcePath); err != nil {
+		return fmt.Errorf("source file does not exist: %s", sourcePath)
+	}
+
+	// Ensure the destination directory exists
+	destDir := filepath.Dir(filepath.Join(mountDir, destPath))
+	if _, err := f.executor.Execute(ctx, "mkdir", "-p", destDir); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Copy the file
+	fullDestPath := filepath.Join(mountDir, destPath)
+	output, err := f.executor.Execute(ctx, "cp", sourcePath, fullDestPath)
+	if err != nil {
+		return fmt.Errorf("failed to copy file: %w, output: %s", err, string(output))
+	}
+
+	return nil
+}
+
 // IsDirectory checks if a path is a directory
 func (f *FilesystemOperations) IsDirectory(mountDir, relativePath string) bool {
 	fullPath := filepath.Join(mountDir, relativePath)

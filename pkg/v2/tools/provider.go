@@ -32,6 +32,7 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 	}
 
 	if config.CacheDir != "" {
+		// TODO: this is fucking wrong
 		fsCache, err := cache.NewFSCache(config.CacheDir)
 		if err != nil {
 			return nil, err

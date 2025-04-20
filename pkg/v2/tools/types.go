@@ -218,6 +218,10 @@ type OperationsTool interface {
 	DecompressTarGZ(ctx context.Context, sourceTarGZ, outputDir string) error
 	// CompressTarGZ compresses a directory to a tar.gz archive
 	CompressTarGZ(ctx context.Context, sourceDir, outputTarGZ string) error
+	// DecompressGZ decompresses a GZ-compressed file
+	DecompressGZ(ctx context.Context, sourceGZ, outputDir string) (string, error)
+	// CompressGZ compresses a file using GZ compression
+	CompressGZ(ctx context.Context, sourcePath, outputGZ string) error
 }
 
 // NodeTool provides an interface for interacting with nodes

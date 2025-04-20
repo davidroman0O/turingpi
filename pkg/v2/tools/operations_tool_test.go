@@ -12,10 +12,6 @@ import (
 // TestOperationsToolWithContainer tests the operations tool using a real container
 // This is an integration test that requires Docker
 func TestOperationsToolWithContainer(t *testing.T) {
-	// Skip if not running integration tests (can be controlled with env var)
-	/*if os.Getenv("RUN_INTEGRATION_TESTS") != "1" {
-		t.Skip("Skipping integration test; set RUN_INTEGRATION_TESTS=1 to run")
-	}*/
 
 	ctx := context.Background()
 
@@ -107,10 +103,6 @@ func TestOperationsToolWithContainer(t *testing.T) {
 
 // TestNewOperationsTool tests creating an operations tool
 func TestNewOperationsTool(t *testing.T) {
-	// Skip if not running integration tests (can be controlled with env var)
-	/*if os.Getenv("RUN_INTEGRATION_TESTS") != "1" {
-		t.Skip("Skipping integration test; set RUN_INTEGRATION_TESTS=1 to run")
-	}*/
 
 	// Create a container registry
 	registry, err := container.NewDockerRegistry()

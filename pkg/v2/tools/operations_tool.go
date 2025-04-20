@@ -71,12 +71,7 @@ func (t *OperationsToolImpl) WriteFile(ctx context.Context, mountDir, relativePa
 
 // CopyFile copies a file to the mounted image
 func (t *OperationsToolImpl) CopyFile(ctx context.Context, mountDir, sourcePath, destPath string) error {
-	// Use rsync or cp via the executor
-	_, err := t.executor.Execute(ctx, "cp", sourcePath, mountDir+"/"+destPath)
-	if err != nil {
-		return err
-	}
-	return nil
+	return t.filesystemOps.CopyFile(ctx, mountDir, sourcePath, destPath)
 }
 
 // ReadFile reads a file from the mounted image
@@ -122,4 +117,14 @@ func (t *OperationsToolImpl) DecompressTarGZ(ctx context.Context, sourceTarGZ, o
 // CompressTarGZ compresses a directory to a tar.gz archive
 func (t *OperationsToolImpl) CompressTarGZ(ctx context.Context, sourceDir, outputTarGZ string) error {
 	return t.compressionOps.CompressTarGZ(ctx, sourceDir, outputTarGZ)
+}
+
+// DecompressGZ decompresses a GZ-compressed file
+func (t *OperationsToolImpl) DecompressGZ(ctx context.Context, sourceGZ, outputDir string) (string, error) {
+	return t.compressionOps.DecompressGZ(ctx, sourceGZ, outputDir)
+}
+
+// CompressGZ compresses a file using GZ compression
+func (t *OperationsToolImpl) CompressGZ(ctx context.Context, sourcePath, outputGZ string) error {
+	return t.compressionOps.CompressGZ(ctx, sourcePath, outputGZ)
 }

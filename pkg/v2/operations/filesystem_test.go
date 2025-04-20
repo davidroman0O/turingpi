@@ -2,6 +2,9 @@ package operations
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -220,5 +223,62 @@ func TestGetFilesystemType(t *testing.T) {
 				t.Errorf("Expected call to 'blkid', got '%s'", mockExec.Calls[0].Name)
 			}
 		})
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	// Create a real executor for integration testing
+	executor := &NativeExecutor{}
+	fsOps := NewFilesystemOperations(executor)
+
+	// Create a temporary directory for our test files
+	tempDir, err := os.MkdirTemp("", "filesystem-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create source test file
+	sourceContent := []byte("This is a test file for copying")
+	sourceFile := filepath.Join(tempDir, "source.txt")
+	if err := os.WriteFile(sourceFile, sourceContent, 0644); err != nil {
+		t.Fatalf("Failed to create source file: %v", err)
+	}
+
+	// Create a "mount" directory
+	mountDir := filepath.Join(tempDir, "mount")
+	if err := os.MkdirAll(mountDir, 0755); err != nil {
+		t.Fatalf("Failed to create mount directory: %v", err)
+	}
+
+	// Test copying the file
+	ctx := context.Background()
+	destPath := "subdir/dest.txt"
+	err = fsOps.CopyFile(ctx, mountDir, sourceFile, destPath)
+	if err != nil {
+		t.Fatalf("CopyFile failed: %v", err)
+	}
+
+	// Verify the file was copied correctly
+	copiedFile := filepath.Join(mountDir, destPath)
+	if _, err := os.Stat(copiedFile); os.IsNotExist(err) {
+		t.Fatalf("Copied file was not created at %s", copiedFile)
+	}
+
+	// Read the copied file and verify its contents
+	copiedContent, err := os.ReadFile(copiedFile)
+	if err != nil {
+		t.Fatalf("Failed to read copied file: %v", err)
+	}
+
+	if string(copiedContent) != string(sourceContent) {
+		t.Fatalf("Copied content does not match source. Expected %q, got %q", sourceContent, copiedContent)
+	}
+
+	// Test error case with non-existent source file
+	nonExistentFile := filepath.Join(tempDir, "non-existent.txt")
+	err = fsOps.CopyFile(ctx, mountDir, nonExistentFile, "error.txt")
+	if err == nil || !strings.Contains(err.Error(), "source file does not exist") {
+		t.Fatalf("Expected 'source file does not exist' error, got: %v", err)
 	}
 }
