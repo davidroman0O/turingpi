@@ -28,9 +28,19 @@ func (s *KVStore) Put(key string, value any) error {
 	return s.PutWithTTL(key, value, 0)
 }
 
+// PutWithMetadata stores a value with metadata
+func (s *KVStore) PutWithMetadata(key string, value any, metadata *Metadata) error {
+	return s.PutWithTTLAndMetadata(key, value, 0, metadata)
+}
+
 // PutWithTTL stores any Go value under key with a specified time-to-live duration.
 // If ttl is 0 or negative, the entry will not expire.
 func (s *KVStore) PutWithTTL(key string, value any, ttl time.Duration) error {
+	return s.PutWithTTLAndMetadata(key, value, ttl, nil)
+}
+
+// PutWithTTLAndMetadata stores any Go value with both TTL and metadata
+func (s *KVStore) PutWithTTLAndMetadata(key string, value any, ttl time.Duration, metadata *Metadata) error {
 	if key == "" {
 		return errors.New("key cannot be empty")
 	}
@@ -48,8 +58,20 @@ func (s *KVStore) PutWithTTL(key string, value any, ttl time.Duration) error {
 		expiresAt = &exp
 	}
 
+	// Use the provided metadata or create a new one
+	var meta *Metadata
+	if metadata != nil {
+		meta = metadata
+	}
+
 	s.mu.Lock()
-	s.data[key] = entry{typ: t, blob: blob, expiresAt: expiresAt}
+	// If entry already exists and has metadata, preserve it unless new metadata is provided
+	if existingEntry, exists := s.data[key]; exists && existingEntry.metadata != nil && metadata == nil {
+		meta = existingEntry.metadata
+		// Update the UpdatedAt timestamp
+		meta.UpdatedAt = time.Now()
+	}
+	s.data[key] = entry{typ: t, blob: blob, expiresAt: expiresAt, metadata: meta}
 	s.mu.Unlock()
 	return nil
 }
@@ -309,32 +331,67 @@ func (s *KVStore) UpdateFields(key string, fields map[string]interface{}) error 
 	return nil
 }
 
-// Merge combines the contents of another KVStore into this one.
+// Merge combines this store with another, handling collisions according to the strategy.
+// Returns a list of collided keys and handles metadata merging.
 func (s *KVStore) Merge(other *KVStore, strategy MergeStrategy) ([]string, error) {
-	collisions := s.FindKeyCollisions(other)
-
-	if strategy == Error && len(collisions) > 0 {
-		return collisions, fmt.Errorf("merge failed due to %d key collision(s)", len(collisions))
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	other.mu.RLock()
-	defer other.mu.RUnlock()
+	collisions := []string{}
 
-	for k, otherEntry := range other.data {
+	for key, otherEntry := range other.data {
+		// Check if the entry has expired
 		if otherEntry.expiresAt != nil && time.Now().After(*otherEntry.expiresAt) {
 			continue
 		}
 
-		if _, exists := s.data[k]; exists {
-			if strategy == Skip {
+		_, exists := s.data[key]
+		if exists {
+			collisions = append(collisions, key)
+
+			switch strategy {
+			case Error:
+				return collisions, fmt.Errorf("key collision on merge: %s", key)
+			case Skip:
+				// Keep the original entry
 				continue
+			case Overwrite:
+				// Fall through to overwrite
 			}
 		}
 
-		s.data[k] = otherEntry
+		// Handle metadata merging
+		if exists && strategy == Overwrite {
+			if existingEntry, ok := s.data[key]; ok && existingEntry.metadata != nil && otherEntry.metadata != nil {
+				// Merge tags (union of both sets)
+				for _, tag := range otherEntry.metadata.Tags {
+					found := false
+					for _, existingTag := range existingEntry.metadata.Tags {
+						if existingTag == tag {
+							found = true
+							break
+						}
+					}
+					if !found {
+						existingEntry.metadata.Tags = append(existingEntry.metadata.Tags, tag)
+					}
+				}
+
+				// Merge properties (overwrite existingEntry properties with otherEntry properties)
+				for k, v := range otherEntry.metadata.Properties {
+					existingEntry.metadata.Properties[k] = v
+				}
+
+				// Update timestamps
+				existingEntry.metadata.UpdatedAt = time.Now()
+
+				// Create a new entry with merged metadata
+				otherEntry.metadata = existingEntry.metadata
+			}
+		}
+
+		// Add or overwrite the entry
+		s.data[key] = otherEntry
 	}
 
 	return collisions, nil
@@ -461,4 +518,210 @@ func assertToMap(v interface{}) (map[string]interface{}, bool) {
 	}
 
 	return m, true
+}
+
+// GetMetadata returns the metadata for a key
+func (s *KVStore) GetMetadata(key string) (*Metadata, error) {
+	if key == "" {
+		return nil, errors.New("key cannot be empty")
+	}
+
+	s.mu.RLock()
+	e, ok := s.data[key]
+	s.mu.RUnlock()
+
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	// Check if the entry has expired
+	if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+		s.Delete(key)
+		return nil, ErrExpired
+	}
+
+	// If no metadata exists, create a new one
+	if e.metadata == nil {
+		meta := NewMetadata()
+		s.mu.Lock()
+		s.data[key] = entry{typ: e.typ, blob: e.blob, expiresAt: e.expiresAt, metadata: meta}
+		s.mu.Unlock()
+		return meta, nil
+	}
+
+	return e.metadata, nil
+}
+
+// SetMetadata sets or replaces the metadata for a key
+func (s *KVStore) SetMetadata(key string, metadata *Metadata) error {
+	if key == "" {
+		return errors.New("key cannot be empty")
+	}
+
+	if metadata == nil {
+		return errors.New("metadata cannot be nil")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, ok := s.data[key]
+	if !ok {
+		return ErrNotFound
+	}
+
+	// Check if the entry has expired
+	if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+		delete(s.data, key)
+		return ErrExpired
+	}
+
+	e.metadata = metadata
+	s.data[key] = e
+	return nil
+}
+
+// AddTag adds a tag to the metadata for a key
+func (s *KVStore) AddTag(key string, tag string) error {
+	meta, err := s.GetMetadata(key)
+	if err != nil {
+		return err
+	}
+
+	meta.AddTag(tag)
+	return nil
+}
+
+// RemoveTag removes a tag from the metadata for a key
+func (s *KVStore) RemoveTag(key string, tag string) error {
+	meta, err := s.GetMetadata(key)
+	if err != nil {
+		return err
+	}
+
+	meta.RemoveTag(tag)
+	return nil
+}
+
+// HasTag checks if a key's metadata has a specific tag
+func (s *KVStore) HasTag(key string, tag string) (bool, error) {
+	meta, err := s.GetMetadata(key)
+	if err != nil {
+		return false, err
+	}
+
+	return meta.HasTag(tag), nil
+}
+
+// FindKeysByTag returns all keys that have a specific tag in their metadata
+func (s *KVStore) FindKeysByTag(tag string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var keys []string
+	for k, e := range s.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+
+		// Skip entries with no metadata or without the tag
+		if e.metadata != nil && e.metadata.HasTag(tag) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// FindKeysByAllTags returns all keys that have all the specified tags in their metadata
+func (s *KVStore) FindKeysByAllTags(tags []string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var keys []string
+	for k, e := range s.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+
+		// Skip entries with no metadata or without all the tags
+		if e.metadata != nil && e.metadata.HasAllTags(tags) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// FindKeysByAnyTag returns all keys that have any of the specified tags in their metadata
+func (s *KVStore) FindKeysByAnyTag(tags []string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var keys []string
+	for k, e := range s.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+
+		// Skip entries with no metadata or without any of the tags
+		if e.metadata != nil && e.metadata.HasAnyTag(tags) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// SetProperty sets a property in a key's metadata
+func (s *KVStore) SetProperty(key string, propertyKey string, propertyValue interface{}) error {
+	meta, err := s.GetMetadata(key)
+	if err != nil {
+		return err
+	}
+
+	meta.SetProperty(propertyKey, propertyValue)
+	return nil
+}
+
+// GetProperty gets a property from a key's metadata
+func (s *KVStore) GetProperty(key string, propertyKey string) (interface{}, error) {
+	meta, err := s.GetMetadata(key)
+	if err != nil {
+		return nil, err
+	}
+
+	val, exists := meta.GetProperty(propertyKey)
+	if !exists {
+		return nil, fmt.Errorf("property '%s' not found", propertyKey)
+	}
+	return val, nil
+}
+
+// FindKeysByProperty returns all keys that have a specific property with a specific value
+func (s *KVStore) FindKeysByProperty(propertyKey string, propertyValue interface{}) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var keys []string
+	for k, e := range s.data {
+		// Skip expired entries
+		if e.expiresAt != nil && time.Now().After(*e.expiresAt) {
+			continue
+		}
+
+		// Skip entries with no metadata
+		if e.metadata == nil {
+			continue
+		}
+
+		// Check if the property exists and matches the value
+		if val, exists := e.metadata.Properties[propertyKey]; exists {
+			// Compare values (careful with types)
+			if reflect.DeepEqual(val, propertyValue) {
+				keys = append(keys, k)
+			}
+		}
+	}
+	return keys
 }
