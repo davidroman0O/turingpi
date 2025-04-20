@@ -94,145 +94,149 @@ func TestDynamicStageAndActionManagement(t *testing.T) {
 
 	// Add a manager action that creates and manipulates stages and actions
 	managerAction := NewTestActionWithTags("manager-action", "Manager Action", []string{"manager", "core"}, func(ctx *ActionContext) error {
-		// Create a new stage with tags
-		newStage1 := NewStageWithTags("dynamic-stage-1", "Dynamic Stage 1", "Dynamically created stage 1", []string{"dynamic", "primary"})
-		newStage1.AddAction(NewTestActionWithTags("dynamic-action-1", "Dynamic Action 1", []string{"dynamic", "primary"}, func(innerCtx *ActionContext) error {
-			// Enable the second dynamic stage that will be disabled by default
-			innerCtx.EnableStage("dynamic-stage-2")
+		t.Run("Manager Action - Stage/Action Setup", func(t *testing.T) {
+			// Create a new stage with tags
+			newStage1 := NewStageWithTags("dynamic-stage-1", "Dynamic Stage 1", "Dynamically created stage 1", []string{"dynamic", "primary"})
+			newStage1.AddAction(NewTestActionWithTags("dynamic-action-1", "Dynamic Action 1", []string{"dynamic", "primary"}, func(innerCtx *ActionContext) error {
+				// Enable the second dynamic stage that will be disabled by default
+				innerCtx.EnableStage("dynamic-stage-2")
 
-			// Record that this action executed
-			testState["dynamic-action-1-executed"] = true
-
-			return nil
-		}))
-
-		// Add the first dynamic stage
-		ctx.AddDynamicStage(newStage1)
-		createdStageIDs = append(createdStageIDs, "dynamic-stage-1")
-
-		// Create a second stage (will be disabled by default) with tags
-		newStage2 := NewStageWithTags("dynamic-stage-2", "Dynamic Stage 2", "Dynamically created stage 2", []string{"dynamic", "secondary"})
-		newStage2.AddAction(NewTestActionWithTags("dynamic-action-2", "Dynamic Action 2", []string{"dynamic", "critical"}, func(innerCtx *ActionContext) error {
-			// Find and enable the third action in this stage
-			action := innerCtx.FindActionInStage("dynamic-stage-2", "dynamic-action-3")
-			assert.NotNil(t, action, "Should find dynamic-action-3")
-
-			// Create and add a new action to this stage directly
-			newAction := NewTestActionWithTags("dynamic-action-4", "Dynamic Action 4", []string{"dynamic", "optional"}, func(ctx *ActionContext) error {
 				// Record that this action executed
-				testState["dynamic-action-4-executed"] = true
+				testState["dynamic-action-1-executed"] = true
+
 				return nil
-			})
+			}))
 
-			innerCtx.AddActionToStage("dynamic-stage-2", newAction)
+			// Add the first dynamic stage
+			ctx.AddDynamicStage(newStage1)
+			createdStageIDs = append(createdStageIDs, "dynamic-stage-1")
 
-			// Enable the third action
-			innerCtx.EnableAction("dynamic-action-3")
+			// Create a second stage (will be disabled by default) with tags
+			newStage2 := NewStageWithTags("dynamic-stage-2", "Dynamic Stage 2", "Dynamically created stage 2", []string{"dynamic", "secondary"})
+			newStage2.AddAction(NewTestActionWithTags("dynamic-action-2", "Dynamic Action 2", []string{"dynamic", "critical"}, func(innerCtx *ActionContext) error {
+				t.Run("Manager Action - Dynamic Action 2 Execution", func(t *testing.T) {
+					// Find and enable the third action in this stage
+					action := innerCtx.FindActionInStage("dynamic-stage-2", "dynamic-action-3")
+					assert.NotNil(t, action, "Should find dynamic-action-3")
 
-			// Record that this action executed and stage-2 is now active
-			testState["dynamic-action-2-executed"] = true
-			testState["stage-2-active"] = true
+					// Create and add a new action to this stage directly
+					newAction := NewTestActionWithTags("dynamic-action-4", "Dynamic Action 4", []string{"dynamic", "optional"}, func(ctx *ActionContext) error {
+						// Record that this action executed
+						testState["dynamic-action-4-executed"] = true
+						return nil
+					})
 
-			// List all actions in this stage and verify count
-			actions := innerCtx.ListAllStageActions("dynamic-stage-2")
-			assert.Equal(t, 4, len(actions), "Should have 4 actions in dynamic-stage-2 at this point (including dynamic-action-3 and dynamic-action-4)")
+					innerCtx.AddActionToStage("dynamic-stage-2", newAction)
 
-			return nil
-		}))
+					// Enable the third action
+					innerCtx.EnableAction("dynamic-action-3")
 
-		// Add a third action that is disabled by default with tags
-		newStage2.AddAction(NewTestActionWithTags("dynamic-action-3", "Dynamic Action 3", []string{"dynamic", "cleanup"}, func(innerCtx *ActionContext) error {
-			// This should run since it's enabled by dynamic-action-2
-			testState["dynamic-action-3-executed"] = true
+					// Record that this action executed and stage-2 is now active
+					testState["dynamic-action-2-executed"] = true
+					testState["stage-2-active"] = true
 
-			// This is a good place to test tag filtering now that all actions are added
-			// Test tag-based filtering capabilities on actions
-			criticalActions := innerCtx.FindActionsByTag("critical")
-			assert.Equal(t, 1, len(criticalActions), "Should find 1 action with 'critical' tag")
+					// List all actions in this stage and verify count
+					actions := innerCtx.ListAllStageActions("dynamic-stage-2")
+					assert.Equal(t, 4, len(actions), "Should have 4 actions in dynamic-stage-2 at this point (including dynamic-action-3 and dynamic-action-4)")
+				})
+				return nil
+			}))
 
-			optionalActions := innerCtx.FindActionsByTag("optional")
-			assert.Equal(t, 2, len(optionalActions), "Should find 2 actions with 'optional' tag")
+			// Add a third action that is disabled by default with tags
+			newStage2.AddAction(NewTestActionWithTags("dynamic-action-3", "Dynamic Action 3", []string{"dynamic", "cleanup"}, func(innerCtx *ActionContext) error {
+				t.Run("Manager Action - Dynamic Action 3 Execution and Filtering Tests", func(t *testing.T) {
+					// This should run since it's enabled by dynamic-action-2
+					testState["dynamic-action-3-executed"] = true
 
-			// Test tag-based operations
-			dynamicActions := innerCtx.FindActionsByTag("dynamic")
-			assert.True(t, len(dynamicActions) >= 4, "Should find at least 4 actions with 'dynamic' tag")
+					// This is a good place to test tag filtering now that all actions are added
+					// Test tag-based filtering capabilities on actions
+					criticalActions := innerCtx.FindActionsByTag("critical")
+					assert.Equal(t, 1, len(criticalActions), "Should find 1 action with 'critical' tag")
 
-			// Test finding actions by multiple tags
-			cleanupActions := innerCtx.FindActionsByTag("cleanup")
-			assert.True(t, len(cleanupActions) >= 2, "Should find at least 2 actions with 'cleanup' tag")
+					optionalActions := innerCtx.FindActionsByTag("optional")
+					assert.Equal(t, 2, len(optionalActions), "Should find 2 actions with 'optional' tag")
 
-			// Test stage tag filtering
-			dynamicStages := innerCtx.FindStagesByTag("dynamic")
-			assert.Equal(t, 2, len(dynamicStages), "Should find 2 stages with the 'dynamic' tag")
+					// Test tag-based operations
+					dynamicActions := innerCtx.FindActionsByTag("dynamic")
+					assert.True(t, len(dynamicActions) >= 4, "Should find at least 4 actions with 'dynamic' tag")
 
-			primaryStages := innerCtx.FindStagesByTag("primary")
-			assert.Equal(t, 1, len(primaryStages), "Should find 1 stage with the 'primary' tag")
+					// Test finding actions by multiple tags
+					cleanupActions := innerCtx.FindActionsByTag("cleanup")
+					assert.True(t, len(cleanupActions) >= 2, "Should find at least 2 actions with 'cleanup' tag")
 
-			// Test finding stages by multiple tags
-			dynamicPrimaryStages := innerCtx.FindStagesByAllTags([]string{"dynamic", "primary"})
-			assert.Equal(t, 1, len(dynamicPrimaryStages), "Should find 1 stage with both 'dynamic' and 'primary' tags")
+					// Test stage tag filtering
+					dynamicStages := innerCtx.FindStagesByTag("dynamic")
+					assert.Equal(t, 2, len(dynamicStages), "Should find 2 stages with the 'dynamic' tag")
 
-			// Test tag operations
-			innerCtx.DisableActionsByTag("optional")
-			assert.False(t, innerCtx.IsActionEnabled("dynamic-action-4"), "dynamic-action-4 should be disabled")
+					primaryStages := innerCtx.FindStagesByTag("primary")
+					assert.Equal(t, 1, len(primaryStages), "Should find 1 stage with the 'primary' tag")
 
-			// Re-enable the optional action
-			enabledCount := innerCtx.EnableActionsByTag("optional")
-			assert.Equal(t, 2, enabledCount, "Should enable 2 optional actions")
-			assert.True(t, innerCtx.IsActionEnabled("dynamic-action-4"), "dynamic-action-4 should be enabled again")
+					// Test finding stages by multiple tags
+					dynamicPrimaryStages := innerCtx.FindStagesByAllTags([]string{"dynamic", "primary"})
+					assert.Equal(t, 1, len(dynamicPrimaryStages), "Should find 1 stage with both 'dynamic' and 'primary' tags")
 
-			// Test finding actions by any tag
-			criticalOrOptionalActions := innerCtx.FindActionsByAnyTag([]string{"critical", "optional"})
-			assert.Equal(t, 3, len(criticalOrOptionalActions), "Should find 3 actions with either 'critical' or 'optional' tags")
+					// Test tag operations
+					innerCtx.DisableActionsByTag("optional")
+					assert.False(t, innerCtx.IsActionEnabled("dynamic-action-4"), "dynamic-action-4 should be disabled")
 
-			return nil
-		}))
+					// Re-enable the optional action
+					enabledCount := innerCtx.EnableActionsByTag("optional")
+					assert.Equal(t, 2, enabledCount, "Should enable 2 optional actions")
+					assert.True(t, innerCtx.IsActionEnabled("dynamic-action-4"), "dynamic-action-4 should be enabled again")
 
-		// Add a fourth action to make sure counts match later with tags
-		newStage2.AddAction(NewTestActionWithTags("dynamic-action-5", "Dynamic Action 5", []string{"dynamic", "cleanup", "optional"}, func(innerCtx *ActionContext) error {
+					// Test finding actions by any tag
+					criticalOrOptionalActions := innerCtx.FindActionsByAnyTag([]string{"critical", "optional"})
+					assert.Equal(t, 3, len(criticalOrOptionalActions), "Should find 3 actions with either 'critical' or 'optional' tags")
+				})
+				return nil
+			}))
+
+			// Add a fourth action to make sure counts match later with tags
+			newStage2.AddAction(NewTestActionWithTags("dynamic-action-5", "Dynamic Action 5", []string{"dynamic", "cleanup", "optional"}, func(innerCtx *ActionContext) error {
+				// Record that this action executed
+				testState["dynamic-action-5-executed"] = true
+				return nil
+			}))
+
+			// Disable the third action - will be re-enabled by dynamic-action-2
+			ctx.DisableAction("dynamic-action-3")
+
+			// Add the second dynamic stage
+			ctx.AddDynamicStage(newStage2)
+			createdStageIDs = append(createdStageIDs, "dynamic-stage-2")
+
+			// Disable the second stage by default - will be enabled by dynamic-action-1
+			ctx.DisableStage("dynamic-stage-2")
+
+			// List all stages and verify count (only the manager stage should exist in the workflow at this point)
+			// The dynamic stages will be added after this action completes
+			allStages := ctx.ListAllStages()
+			assert.Equal(t, 1, len(allStages), "Should have 1 stage (only manager) before execution completes")
+
 			// Record that this action executed
-			testState["dynamic-action-5-executed"] = true
-			return nil
-		}))
-
-		// Disable the third action - will be re-enabled by dynamic-action-2
-		ctx.DisableAction("dynamic-action-3")
-
-		// Add the second dynamic stage
-		ctx.AddDynamicStage(newStage2)
-		createdStageIDs = append(createdStageIDs, "dynamic-stage-2")
-
-		// Disable the second stage by default - will be enabled by dynamic-action-1
-		ctx.DisableStage("dynamic-stage-2")
-
-		// List all stages and verify count (only the manager stage should exist in the workflow at this point)
-		// The dynamic stages will be added after this action completes
-		allStages := ctx.ListAllStages()
-		assert.Equal(t, 1, len(allStages), "Should have 1 stage (only manager) before execution completes")
-
-		// Record that this action executed
-		testState["manager-action-executed"] = true
-
+			testState["manager-action-executed"] = true
+		})
 		return nil
 	})
 
 	// Add a second action to add and then remove a stage
 	managerStage.AddAction(NewTestActionWithTags("stage-removal-test", "Stage Removal Test", []string{"manager", "cleanup"}, func(ctx *ActionContext) error {
-		// Create a test stage to demonstrate removal with tags
-		removeStage := NewStageWithTags("remove-me", "Remove Me", "Stage that will be removed", []string{"temporary", "cleanup"})
-		ctx.AddDynamicStage(removeStage)
+		t.Run("Stage Removal Action", func(t *testing.T) {
+			// Create a test stage to demonstrate removal with tags
+			removeStage := NewStageWithTags("remove-me", "Remove Me", "Stage that will be removed", []string{"temporary", "cleanup"})
+			ctx.AddDynamicStage(removeStage)
 
-		// Immediately remove it from the dynamic stages
-		found := ctx.RemoveStage("remove-me")
-		assert.True(t, found, "Should find and remove the 'remove-me' stage")
+			// Immediately remove it from the dynamic stages
+			found := ctx.RemoveStage("remove-me")
+			assert.True(t, found, "Should find and remove the 'remove-me' stage")
 
-		// Verify stage was removed
-		stage := ctx.FindStage("remove-me")
-		assert.Nil(t, stage, "Removed stage should no longer exist")
+			// Verify stage was removed
+			stage := ctx.FindStage("remove-me")
+			assert.Nil(t, stage, "Removed stage should no longer exist")
 
-		// Record that this action executed
-		testState["stage-removal-test-executed"] = true
-
+			// Record that this action executed
+			testState["stage-removal-test-executed"] = true
+		})
 		return nil
 	}))
 
@@ -244,42 +248,48 @@ func TestDynamicStageAndActionManagement(t *testing.T) {
 	err := workflow.Execute(context.Background(), logger)
 	assert.NoError(t, err)
 
-	// Verify the workflow now has all expected stages (manager + 2 dynamic stages)
-	// The "remove-me" stage should have been removed
-	assert.Equal(t, 3, len(workflow.Stages), "Should have 3 stages after execution")
+	// === Verification Sub-tests ===
 
-	// Get the stage IDs for verification
-	stageIDs := make([]string, 0)
-	for _, stage := range workflow.Stages {
-		stageIDs = append(stageIDs, stage.ID)
-	}
+	t.Run("Verify Final Stage Structure", func(t *testing.T) {
+		// Verify the workflow now has all expected stages (manager + 2 dynamic stages)
+		// The "remove-me" stage should have been removed
+		assert.Equal(t, 3, len(workflow.Stages), "Should have 3 stages after execution")
 
-	// Verify all expected stages exist
-	assert.Contains(t, stageIDs, "manager", "Manager stage should exist")
-	assert.Contains(t, stageIDs, "dynamic-stage-1", "Dynamic stage 1 should exist")
-	assert.Contains(t, stageIDs, "dynamic-stage-2", "Dynamic stage 2 should exist")
-	assert.NotContains(t, stageIDs, "remove-me", "Removed stage should not exist")
-
-	// Verify tags on stages
-	for _, stage := range workflow.Stages {
-		if stage.ID == "dynamic-stage-1" {
-			assert.True(t, stage.HasTag("primary"), "Dynamic stage 1 should have 'primary' tag")
-			assert.True(t, stage.HasTag("dynamic"), "Dynamic stage 1 should have 'dynamic' tag")
-		} else if stage.ID == "dynamic-stage-2" {
-			assert.True(t, stage.HasTag("secondary"), "Dynamic stage 2 should have 'secondary' tag")
-			assert.True(t, stage.HasTag("dynamic"), "Dynamic stage 2 should have 'dynamic' tag")
+		// Get the stage IDs for verification
+		stageIDs := make([]string, 0)
+		for _, stage := range workflow.Stages {
+			stageIDs = append(stageIDs, stage.ID)
 		}
-	}
 
-	// Verify that all the expected actions executed
-	assert.True(t, testState["manager-action-executed"], "manager-action should have executed")
-	assert.True(t, testState["stage-removal-test-executed"], "stage-removal-test should have executed")
-	assert.True(t, testState["dynamic-action-1-executed"], "dynamic-action-1 should have executed")
-	assert.True(t, testState["dynamic-action-2-executed"], "dynamic-action-2 should have executed")
-	assert.True(t, testState["dynamic-action-3-executed"], "dynamic-action-3 should have executed")
-	assert.True(t, testState["dynamic-action-4-executed"], "dynamic-action-4 should have executed")
-	assert.True(t, testState["dynamic-action-5-executed"], "dynamic-action-5 should have executed")
-	assert.True(t, testState["stage-2-active"], "stage-2 should have been activated")
+		// Verify all expected stages exist
+		assert.Contains(t, stageIDs, "manager", "Manager stage should exist")
+		assert.Contains(t, stageIDs, "dynamic-stage-1", "Dynamic stage 1 should exist")
+		assert.Contains(t, stageIDs, "dynamic-stage-2", "Dynamic stage 2 should exist")
+		assert.NotContains(t, stageIDs, "remove-me", "Removed stage should not exist")
+
+		// Verify tags on stages
+		for _, stage := range workflow.Stages {
+			if stage.ID == "dynamic-stage-1" {
+				assert.True(t, stage.HasTag("primary"), "Dynamic stage 1 should have 'primary' tag")
+				assert.True(t, stage.HasTag("dynamic"), "Dynamic stage 1 should have 'dynamic' tag")
+			} else if stage.ID == "dynamic-stage-2" {
+				assert.True(t, stage.HasTag("secondary"), "Dynamic stage 2 should have 'secondary' tag")
+				assert.True(t, stage.HasTag("dynamic"), "Dynamic stage 2 should have 'dynamic' tag")
+			}
+		}
+	})
+
+	t.Run("Verify Action Execution State", func(t *testing.T) {
+		// Verify that all the expected actions executed
+		assert.True(t, testState["manager-action-executed"], "manager-action should have executed")
+		assert.True(t, testState["stage-removal-test-executed"], "stage-removal-test should have executed")
+		assert.True(t, testState["dynamic-action-1-executed"], "dynamic-action-1 should have executed")
+		assert.True(t, testState["dynamic-action-2-executed"], "dynamic-action-2 should have executed")
+		assert.True(t, testState["dynamic-action-3-executed"], "dynamic-action-3 should have executed")
+		assert.True(t, testState["dynamic-action-4-executed"], "dynamic-action-4 should have executed")
+		assert.True(t, testState["dynamic-action-5-executed"], "dynamic-action-5 should have executed")
+		assert.True(t, testState["stage-2-active"], "stage-2 should have been activated")
+	})
 }
 
 func TestFilteringAndQuerying(t *testing.T) {

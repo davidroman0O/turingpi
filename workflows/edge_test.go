@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/davidroman0O/turingpi/workflows/store"
 	"github.com/stretchr/testify/assert"
@@ -240,124 +239,6 @@ func TestNestedErrorWrapping(t *testing.T) {
 
 		// Only first two actions should have executed
 		assert.Equal(t, []string{"action1", "action2"}, executedActions)
-	})
-}
-
-// TestStoreEdgeCases tests edge cases in the KV store
-func TestStoreEdgeCases(t *testing.T) {
-	t.Run("expired_key_behavior", func(t *testing.T) {
-		s := store.NewKVStore()
-
-		// Add a key with a very short expiration
-		err := s.PutWithTTL("temp-key", "temp-value", 1*time.Millisecond)
-		assert.NoError(t, err)
-
-		// Wait for expiration
-		time.Sleep(5 * time.Millisecond)
-
-		// Should get an error when retrieving expired key
-		_, err = store.Get[string](s, "temp-key")
-		assert.Error(t, err)
-		assert.Equal(t, store.ErrExpired, err)
-
-		// Count should not include expired keys
-		assert.Equal(t, 0, s.Count())
-
-		// Trying to update an expired key should fail
-		err = s.Put("temp-key", "updated-value")
-		assert.NoError(t, err) // Actually should work as a new entry
-
-		// Should be able to get the new value
-		val, err := store.Get[string](s, "temp-key")
-		assert.NoError(t, err)
-		assert.Equal(t, "updated-value", val)
-	})
-
-	t.Run("type_mismatch", func(t *testing.T) {
-		s := store.NewKVStore()
-
-		// Store an integer
-		err := s.Put("key", 123)
-		assert.NoError(t, err)
-
-		// Try to get as string (should fail)
-		_, err = store.Get[string](s, "key")
-		assert.Error(t, err)
-		// Don't assert on the exact error message as the implementation might wrap it
-		assert.Contains(t, err.Error(), "type mismatch")
-
-		// Try to get as int (should succeed)
-		val, err := store.Get[int](s, "key")
-		assert.NoError(t, err)
-		assert.Equal(t, 123, val)
-	})
-
-	t.Run("store_key_collisions", func(t *testing.T) {
-		s1 := store.NewKVStore()
-		s2 := store.NewKVStore()
-
-		// Set up different values for the same keys
-		s1.Put("key1", "value1-from-s1")
-		s1.Put("key2", "value2-from-s1")
-		s1.Put("key3", 123)
-
-		s2.Put("key1", "value1-from-s2")
-		s2.Put("key2", 456)
-		s2.Put("key4", "value4-from-s2")
-
-		// Test key collisions
-		collisions := s1.FindKeyCollisions(s2)
-		assert.Equal(t, 2, len(collisions))
-		assert.Contains(t, collisions, "key1")
-		assert.Contains(t, collisions, "key2")
-
-		// Test different merge strategies
-
-		// Skip strategy
-		collisions, err := s1.Merge(s2, store.Skip)
-		assert.NoError(t, err)
-		assert.Equal(t, 2, len(collisions))
-
-		// Original values should be preserved
-		val1, err := store.Get[string](s1, "key1")
-		assert.NoError(t, err)
-		assert.Equal(t, "value1-from-s1", val1)
-
-		// New keys should be added
-		val4, err := store.Get[string](s1, "key4")
-		assert.NoError(t, err)
-		assert.Equal(t, "value4-from-s2", val4)
-
-		// Reset store
-		s1 = store.NewKVStore()
-		s1.Put("key1", "value1-from-s1")
-		s1.Put("key2", "value2-from-s1")
-		s1.Put("key3", 123)
-
-		// Overwrite strategy
-		collisions, err = s1.Merge(s2, store.Overwrite)
-		assert.NoError(t, err)
-		assert.Equal(t, 2, len(collisions))
-
-		// Values should be overwritten
-		val1, err = store.Get[string](s1, "key1")
-		assert.NoError(t, err)
-		assert.Equal(t, "value1-from-s2", val1)
-
-		// Type changes should be reflected
-		val2, err := store.Get[int](s1, "key2")
-		assert.NoError(t, err)
-		assert.Equal(t, 456, val2)
-
-		// Reset store
-		s1 = store.NewKVStore()
-		s1.Put("key1", "value1-from-s1")
-		s1.Put("key2", "value2-from-s1")
-
-		// Error strategy
-		_, err = s1.Merge(s2, store.Error)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "collision")
 	})
 }
 

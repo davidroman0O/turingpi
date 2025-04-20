@@ -428,24 +428,27 @@ func (ctx *ActionContext) FindActionsByAnyTag(tags []string) []Action {
 	})
 }
 
-// FindActionsByName returns actions with names that contain the search string
+// FindActionsByName returns actions with names that contain the search string (case-insensitive)
 func (ctx *ActionContext) FindActionsByName(nameSubstring string) []Action {
+	lowerNameSubstring := strings.ToLower(nameSubstring)
 	return ctx.FilterActions(func(a Action) bool {
-		return strings.Contains(a.Name(), nameSubstring)
+		return strings.Contains(strings.ToLower(a.Name()), lowerNameSubstring)
 	})
 }
 
 // FindActionsByExactName returns actions with names that exactly match the search string
+// NOTE: This remains case-sensitive for exact matching.
 func (ctx *ActionContext) FindActionsByExactName(name string) []Action {
 	return ctx.FilterActions(func(a Action) bool {
 		return a.Name() == name
 	})
 }
 
-// FindActionsByDescription returns actions with descriptions that contain the search string
+// FindActionsByDescription returns actions with descriptions that contain the search string (case-insensitive)
 func (ctx *ActionContext) FindActionsByDescription(descSubstring string) []Action {
+	lowerDescSubstring := strings.ToLower(descSubstring)
 	return ctx.FilterActions(func(a Action) bool {
-		return strings.Contains(a.Description(), descSubstring)
+		return strings.Contains(strings.ToLower(a.Description()), lowerDescSubstring)
 	})
 }
 
@@ -481,24 +484,27 @@ func (ctx *ActionContext) FindStagesByAnyTag(tags []string) []*Stage {
 	})
 }
 
-// FindStagesByName returns stages with names that contain the search string
+// FindStagesByName returns stages with names that contain the search string (case-insensitive)
 func (ctx *ActionContext) FindStagesByName(nameSubstring string) []*Stage {
+	lowerNameSubstring := strings.ToLower(nameSubstring)
 	return ctx.FilterStages(func(s *Stage) bool {
-		return strings.Contains(s.Name, nameSubstring)
+		return strings.Contains(strings.ToLower(s.Name), lowerNameSubstring)
 	})
 }
 
 // FindStagesByExactName returns stages with names that exactly match the search string
+// NOTE: This remains case-sensitive for exact matching.
 func (ctx *ActionContext) FindStagesByExactName(name string) []*Stage {
 	return ctx.FilterStages(func(s *Stage) bool {
 		return s.Name == name
 	})
 }
 
-// FindStagesByDescription returns stages with descriptions that contain the search string
+// FindStagesByDescription returns stages with descriptions that contain the search string (case-insensitive)
 func (ctx *ActionContext) FindStagesByDescription(descSubstring string) []*Stage {
+	lowerDescSubstring := strings.ToLower(descSubstring)
 	return ctx.FilterStages(func(s *Stage) bool {
-		return strings.Contains(s.Description, descSubstring)
+		return strings.Contains(strings.ToLower(s.Description), lowerDescSubstring)
 	})
 }
 
