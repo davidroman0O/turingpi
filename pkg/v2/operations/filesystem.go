@@ -2,11 +2,13 @@ package operations
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io/fs"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // FilesystemOperations provides filesystem operations that can be executed
@@ -193,17 +195,25 @@ func (f *FilesystemOperations) CopyDirectory(ctx context.Context, src, dst strin
 func (f *FilesystemOperations) WriteFile(mountDir, path string, content []byte, perm fs.FileMode) error {
 	fullPath := filepath.Join(mountDir, path)
 
-	// Ensure parent directory exists
+	// Ensure parent directory exists - using MkdirAll for reliability
 	dirPath := filepath.Dir(fullPath)
 	if _, err := f.executor.Execute(context.Background(), "mkdir", "-p", dirPath); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	// Write content directly to the file
-	escapedContent := strings.ReplaceAll(string(content), "'", "'\\''")
-	cmd := fmt.Sprintf("echo -n '%s' > '%s'", escapedContent, fullPath)
-	if _, err := f.executor.Execute(context.Background(), "bash", "-c", cmd); err != nil {
+	// Create a temporary file with the content
+	tempFile := filepath.Join(dirPath, fmt.Sprintf("temp-%d", time.Now().UnixNano()))
+
+	// Write content directly to the temp file using base64 encoding to avoid shell escaping issues
+	encodedContent := base64.StdEncoding.EncodeToString(content)
+	if _, err := f.executor.Execute(context.Background(), "bash", "-c",
+		fmt.Sprintf("echo '%s' | base64 -d > '%s'", encodedContent, tempFile)); err != nil {
 		return fmt.Errorf("failed to write file content: %w", err)
+	}
+
+	// Move the temp file to the final destination (atomic operation)
+	if _, err := f.executor.Execute(context.Background(), "mv", tempFile, fullPath); err != nil {
+		return fmt.Errorf("failed to move temp file to destination: %w", err)
 	}
 
 	// Set permissions
@@ -217,11 +227,26 @@ func (f *FilesystemOperations) WriteFile(mountDir, path string, content []byte, 
 // ReadFile reads a file from the mounted filesystem
 func (f *FilesystemOperations) ReadFile(mountDir, relativePath string) ([]byte, error) {
 	fullPath := filepath.Join(mountDir, relativePath)
-	output, err := f.executor.Execute(context.Background(), "cat", fullPath)
+
+	// First check if file exists
+	if _, err := f.executor.Execute(context.Background(), "test", "-f", fullPath); err != nil {
+		return nil, fmt.Errorf("file does not exist: %w", err)
+	}
+
+	// Use base64 to read the file to avoid binary data issues and newline handling
+	output, err := f.executor.Execute(context.Background(), "bash", "-c",
+		fmt.Sprintf("cat '%s' | base64", fullPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	return output, nil
+
+	// Decode the base64 content
+	content, err := base64.StdEncoding.DecodeString(string(output))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode file content: %w", err)
+	}
+
+	return content, nil
 }
 
 // FileExists checks if a file exists in the mounted filesystem
@@ -244,11 +269,23 @@ func (f *FilesystemOperations) CopyFile(ctx context.Context, mountDir, sourcePat
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Copy the file
+	// Full path to destination
 	fullDestPath := filepath.Join(mountDir, destPath)
-	output, err := f.executor.Execute(ctx, "cp", sourcePath, fullDestPath)
+
+	// Create a temporary destination to ensure atomic copy
+	tempDest := fmt.Sprintf("%s.tmp.%d", fullDestPath, time.Now().UnixNano())
+
+	// Copy the file to the temp location
+	output, err := f.executor.Execute(ctx, "cp", "-f", sourcePath, tempDest)
 	if err != nil {
 		return fmt.Errorf("failed to copy file: %w, output: %s", err, string(output))
+	}
+
+	// Move the temp file to final destination (atomic)
+	if _, err := f.executor.Execute(ctx, "mv", tempDest, fullDestPath); err != nil {
+		// Try to cleanup temp file
+		f.executor.Execute(ctx, "rm", "-f", tempDest)
+		return fmt.Errorf("failed to finalize file copy: %w", err)
 	}
 
 	return nil

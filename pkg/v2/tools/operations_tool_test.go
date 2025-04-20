@@ -2,9 +2,11 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
 )
@@ -12,7 +14,6 @@ import (
 // TestOperationsToolWithContainer tests the operations tool using a real container
 // This is an integration test that requires Docker
 func TestOperationsToolWithContainer(t *testing.T) {
-
 	ctx := context.Background()
 
 	// Create a container registry
@@ -34,12 +35,19 @@ func TestOperationsToolWithContainer(t *testing.T) {
 		t.Fatalf("Failed to create operations tool: %v", err)
 	}
 
-	// Create a temporary directory for test files
-	tempDir, err := os.MkdirTemp("", "operations_tool_test")
+	// Create a temporary directory in the current working directory
+	pwd, err := os.Getwd()
 	if err != nil {
+		t.Fatalf("Failed to get current working directory: %v", err)
+	}
+
+	tempDirName := fmt.Sprintf("test_ops_dir_%d", time.Now().UnixNano())
+	tempDir := filepath.Join(pwd, tempDirName)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
+	t.Logf("Created test directory: %s", tempDir)
 
 	// Create a test file
 	testContent := []byte("Hello, Operations Tool!")

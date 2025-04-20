@@ -12,14 +12,13 @@ import (
 
 // TuringPiToolProvider is the central implementation of the ToolProvider interface
 type TuringPiToolProvider struct {
-	bmcTool         BMCTool
-	nodeTool        NodeTool
-	imageTool       OperationsTool
-	containerTool   ContainerTool
-	localCacheTool  LocalCacheTool
-	remoteCacheTool RemoteCacheTool
-	fsTool          FSTool
-	mu              sync.RWMutex
+	bmcTool       BMCTool
+	nodeTool      NodeTool
+	imageTool     OperationsTool
+	containerTool ContainerTool
+	localCache    *cache.FSCache
+	remoteCache   *cache.SSHCache
+	mu            sync.RWMutex
 }
 
 // NewTuringPiToolProvider creates a new TuringPiToolProvider
@@ -32,12 +31,12 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 	}
 
 	if config.CacheDir != "" {
-		// TODO: this is fucking wrong
+		// Initialize the local cache directly
 		fsCache, err := cache.NewFSCache(config.CacheDir)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to initialize local cache: %w", err)
 		}
-		provider.localCacheTool = NewLocalCacheTool(fsCache)
+		provider.localCache = fsCache
 	}
 
 	// Container tools depend on platform
@@ -73,20 +72,12 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 
 		sshCache, err := cache.NewSSHCache(sshConfig, config.RemoteCache.RemotePath)
 		if err == nil {
-			provider.remoteCacheTool = NewRemoteCacheTool(
-				config.RemoteCache.NodeID,
-				provider.nodeTool,
-				sshCache,
-				config.RemoteCache.RemotePath,
-			)
+			provider.remoteCache = sshCache
 		} else {
 			// Just log the error and continue without remote cache
 			fmt.Printf("Failed to create remote cache: %v\n", err)
 		}
 	}
-
-	// Initialize filesystem tool
-	provider.fsTool = NewFSTool()
 
 	return provider, nil
 }
@@ -119,25 +110,18 @@ func (p *TuringPiToolProvider) GetContainerTool() ContainerTool {
 	return p.containerTool
 }
 
-// GetLocalCacheTool returns the local cache tool
-func (p *TuringPiToolProvider) GetLocalCacheTool() LocalCacheTool {
+// GetLocalCache returns the local filesystem cache
+func (p *TuringPiToolProvider) GetLocalCache() *cache.FSCache {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.localCacheTool
+	return p.localCache
 }
 
-// GetRemoteCacheTool returns the remote cache tool
-func (p *TuringPiToolProvider) GetRemoteCacheTool(nodeID int) RemoteCacheTool {
+// GetRemoteCache returns the remote SSH cache
+func (p *TuringPiToolProvider) GetRemoteCache() *cache.SSHCache {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.remoteCacheTool
-}
-
-// GetFSTool returns the filesystem tool
-func (p *TuringPiToolProvider) GetFSTool() FSTool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.fsTool
+	return p.remoteCache
 }
 
 // RemoteCacheConfig holds configuration for remote cache
