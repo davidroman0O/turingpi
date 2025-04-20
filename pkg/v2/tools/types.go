@@ -9,7 +9,6 @@ import (
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/cache"
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
-	imageops "github.com/davidroman0O/turingpi/pkg/v2/image"
 	"github.com/davidroman0O/turingpi/pkg/v2/node"
 )
 
@@ -145,7 +144,7 @@ type ContainerTool interface {
 	UnpauseContainer(ctx context.Context, containerID string) error
 	// RunCommand executes a command in a container
 	RunCommand(ctx context.Context, containerID string, cmd []string) (string, error)
-	// RunDetachedCommand executes a command in a container without waiting for output
+	// RunDetachedCommand executes a command in a detached mode
 	RunDetachedCommand(ctx context.Context, containerID string, cmd []string) error
 	// CopyToContainer copies a file or directory to a container
 	CopyToContainer(ctx context.Context, containerID, hostPath, containerPath string) error
@@ -183,10 +182,8 @@ type FSTool interface {
 	CalculateFileHash(path string) (string, error)
 }
 
-// ImageTool provides an interface for disk image operations
-type ImageTool interface {
-	// PrepareImage prepares an image with the given options
-	PrepareImage(ctx context.Context, opts imageops.PrepareImageOptions) error
+// OperationsTool provides an interface for disk image operations
+type OperationsTool interface {
 	// MapPartitions maps partitions in a disk image
 	MapPartitions(ctx context.Context, imgPath string) (string, error)
 	// UnmapPartitions unmaps partitions in a disk image
@@ -205,6 +202,22 @@ type ImageTool interface {
 	CopyFile(ctx context.Context, mountDir, sourcePath, destPath string) error
 	// ReadFile reads a file from the mounted image
 	ReadFile(ctx context.Context, mountDir, relativePath string) ([]byte, error)
+	// CopyToDevice copies an image to a device
+	CopyToDevice(ctx context.Context, imagePath, device string) error
+	// ResizePartition resizes the last partition of a device to fill available space
+	ResizePartition(ctx context.Context, device string) error
+	// ValidateImage validates that an image file exists and is a valid disk image
+	ValidateImage(ctx context.Context, imagePath string) error
+	// ExtractBootFiles extracts kernel and initrd files from a mounted boot partition
+	ExtractBootFiles(ctx context.Context, bootMountPoint, outputDir string) (string, string, error)
+	// ApplyDTBOverlay applies a device tree overlay to a mounted boot partition
+	ApplyDTBOverlay(ctx context.Context, bootMountPoint, dtbOverlayPath string) error
+	// ApplyNetworkConfig applies network configuration to a mounted system
+	ApplyNetworkConfig(ctx context.Context, mountDir, hostname, ipCIDR, gateway string, dnsServers []string) error
+	// DecompressTarGZ decompresses a tar.gz archive to a directory
+	DecompressTarGZ(ctx context.Context, sourceTarGZ, outputDir string) error
+	// CompressTarGZ compresses a directory to a tar.gz archive
+	CompressTarGZ(ctx context.Context, sourceDir, outputTarGZ string) error
 }
 
 // NodeTool provides an interface for interacting with nodes
@@ -226,11 +239,9 @@ type ToolProvider interface {
 	// GetNodeTool returns the node tool
 	GetNodeTool() NodeTool
 	// GetImageTool returns the image tool
-	GetImageTool() ImageTool
+	GetImageTool() OperationsTool
 	// GetContainerTool returns the container tool
 	GetContainerTool() ContainerTool
-	// GetCacheTool returns the general cache tool
-	GetCacheTool() CacheTool
 	// GetLocalCacheTool returns the local cache tool
 	GetLocalCacheTool() LocalCacheTool
 	// GetRemoteCacheTool returns the remote cache tool

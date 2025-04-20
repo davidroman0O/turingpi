@@ -2,41 +2,159 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
 )
 
 // ContainerToolImpl is the implementation of the ContainerTool interface
 type ContainerToolImpl struct {
-	registry container.Registry
+	registry       container.Registry
+	trackedIDs     map[string]bool
+	trackedNamesMu sync.RWMutex
 }
 
 // NewContainerTool creates a new ContainerTool
 func NewContainerTool(registry container.Registry) ContainerTool {
-	return &ContainerToolImpl{
-		registry: registry,
+	tool := &ContainerToolImpl{
+		registry:   registry,
+		trackedIDs: make(map[string]bool),
 	}
+
+	// Initially discover and register all relevant containers in background
+	go tool.discoverAndRegisterContainers()
+
+	return tool
+}
+
+// discoverAndRegisterContainers discovers existing containers and registers them with the registry
+func (t *ContainerToolImpl) discoverAndRegisterContainers() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Only look for turingpi containers
+	cmd := exec.Command("docker", "ps", "-a", "--format", "{{.ID}}|{{.Names}}|{{.Image}}")
+	output, err := cmd.Output()
+	if err != nil {
+		return // Silently fail if docker isn't available
+	}
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		parts := strings.Split(line, "|")
+		if len(parts) < 3 {
+			continue
+		}
+
+		id := parts[0]
+		name := parts[1]
+		image := parts[2]
+
+		// Only register turingpi-related containers
+		if strings.HasPrefix(name, "turingpi-") {
+			t.registerExistingContainer(ctx, id, container.ContainerConfig{
+				Name:  name,
+				Image: image,
+			})
+		}
+	}
+}
+
+// registerExistingContainer registers an existing container with the registry (private helper)
+func (t *ContainerToolImpl) registerExistingContainer(ctx context.Context, containerID string, config container.ContainerConfig) (container.Container, error) {
+	// Skip if we've already tracked this container
+	t.trackedNamesMu.RLock()
+	if t.trackedIDs[containerID] {
+		t.trackedNamesMu.RUnlock()
+		return t.registry.Get(ctx, containerID)
+	}
+	t.trackedNamesMu.RUnlock()
+
+	// Register the container
+	c, err := t.registry.RegisterExistingContainer(ctx, containerID, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Mark as tracked
+	t.trackedNamesMu.Lock()
+	t.trackedIDs[containerID] = true
+	t.trackedNamesMu.Unlock()
+
+	return c, nil
 }
 
 // CreateContainer creates a new container
 func (t *ContainerToolImpl) CreateContainer(ctx context.Context, config container.ContainerConfig) (container.Container, error) {
-	return t.registry.Create(ctx, config)
+	c, err := t.registry.Create(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Track the new container ID
+	t.trackedNamesMu.Lock()
+	t.trackedIDs[c.ID()] = true
+	t.trackedNamesMu.Unlock()
+
+	return c, nil
 }
 
 // GetContainer retrieves a container by ID
 func (t *ContainerToolImpl) GetContainer(ctx context.Context, containerID string) (container.Container, error) {
-	return t.registry.Get(ctx, containerID)
+	// First try to get from registry
+	c, err := t.registry.Get(ctx, containerID)
+	if err == nil {
+		return c, nil
+	}
+
+	// If that fails, try to register it first (maybe it's an external container)
+	// Get container info from Docker
+	cmd := exec.Command("docker", "inspect", "--format", "{{.Name}}|{{.Config.Image}}", containerID)
+	output, cmdErr := cmd.Output()
+	if cmdErr != nil {
+		// If docker inspect fails, return the original error
+		return nil, err
+	}
+
+	parts := strings.Split(strings.TrimSpace(string(output)), "|")
+	if len(parts) != 2 {
+		return nil, err
+	}
+
+	// Clean container name (remove leading slash)
+	name := parts[0]
+	if strings.HasPrefix(name, "/") {
+		name = name[1:]
+	}
+
+	// Try to register and return the container
+	return t.registerExistingContainer(ctx, containerID, container.ContainerConfig{
+		Name:  name,
+		Image: parts[1],
+	})
 }
 
 // ListContainers returns all managed containers
 func (t *ContainerToolImpl) ListContainers(ctx context.Context) ([]container.Container, error) {
+	// First make sure we've discovered all containers
+	t.discoverAndRegisterContainers()
+
+	// Then return the list from the registry
 	return t.registry.List(ctx)
 }
 
 // StartContainer starts a container
 func (t *ContainerToolImpl) StartContainer(ctx context.Context, containerID string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -45,7 +163,7 @@ func (t *ContainerToolImpl) StartContainer(ctx context.Context, containerID stri
 
 // StopContainer stops a container
 func (t *ContainerToolImpl) StopContainer(ctx context.Context, containerID string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -54,7 +172,7 @@ func (t *ContainerToolImpl) StopContainer(ctx context.Context, containerID strin
 
 // KillContainer forcefully stops a container
 func (t *ContainerToolImpl) KillContainer(ctx context.Context, containerID string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -63,7 +181,7 @@ func (t *ContainerToolImpl) KillContainer(ctx context.Context, containerID strin
 
 // PauseContainer pauses a container
 func (t *ContainerToolImpl) PauseContainer(ctx context.Context, containerID string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -72,7 +190,7 @@ func (t *ContainerToolImpl) PauseContainer(ctx context.Context, containerID stri
 
 // UnpauseContainer unpauses a container
 func (t *ContainerToolImpl) UnpauseContainer(ctx context.Context, containerID string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -81,7 +199,7 @@ func (t *ContainerToolImpl) UnpauseContainer(ctx context.Context, containerID st
 
 // RunCommand executes a command in a container
 func (t *ContainerToolImpl) RunCommand(ctx context.Context, containerID string, cmd []string) (string, error) {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return "", err
 	}
@@ -96,7 +214,7 @@ func (t *ContainerToolImpl) RunCommand(ctx context.Context, containerID string, 
 
 // RunDetachedCommand executes a command in a container without waiting for output
 func (t *ContainerToolImpl) RunDetachedCommand(ctx context.Context, containerID string, cmd []string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -105,7 +223,7 @@ func (t *ContainerToolImpl) RunDetachedCommand(ctx context.Context, containerID 
 
 // CopyToContainer copies a file or directory to a container
 func (t *ContainerToolImpl) CopyToContainer(ctx context.Context, containerID, hostPath, containerPath string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -115,7 +233,7 @@ func (t *ContainerToolImpl) CopyToContainer(ctx context.Context, containerID, ho
 
 // CopyFromContainer copies a file or directory from a container
 func (t *ContainerToolImpl) CopyFromContainer(ctx context.Context, containerID, containerPath, hostPath string) error {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return err
 	}
@@ -125,7 +243,7 @@ func (t *ContainerToolImpl) CopyFromContainer(ctx context.Context, containerID, 
 
 // GetContainerLogs returns container logs
 func (t *ContainerToolImpl) GetContainerLogs(ctx context.Context, containerID string) (io.ReadCloser, error) {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +252,7 @@ func (t *ContainerToolImpl) GetContainerLogs(ctx context.Context, containerID st
 
 // WaitForContainer waits for the container to exit
 func (t *ContainerToolImpl) WaitForContainer(ctx context.Context, containerID string) (int, error) {
-	c, err := t.registry.Get(ctx, containerID)
+	c, err := t.GetContainer(ctx, containerID)
 	if err != nil {
 		return -1, err
 	}
@@ -143,7 +261,30 @@ func (t *ContainerToolImpl) WaitForContainer(ctx context.Context, containerID st
 
 // RemoveContainer removes a container
 func (t *ContainerToolImpl) RemoveContainer(ctx context.Context, containerID string) error {
-	return t.registry.Remove(ctx, containerID)
+	// Try to get the container - if it's not found, it may not be registered
+	_, err := t.GetContainer(ctx, containerID)
+	if err != nil {
+		// If the container isn't registered, try to remove it directly with Docker
+		rmCmd := exec.Command("docker", "rm", "-f", containerID)
+		if rmErr := rmCmd.Run(); rmErr == nil {
+			// Removed successfully via Docker CLI
+			t.trackedNamesMu.Lock()
+			delete(t.trackedIDs, containerID)
+			t.trackedNamesMu.Unlock()
+			return nil
+		}
+		return err
+	}
+
+	// Remove from registry
+	err = t.registry.Remove(ctx, containerID)
+	if err == nil {
+		// If successful, remove from tracked IDs
+		t.trackedNamesMu.Lock()
+		delete(t.trackedIDs, containerID)
+		t.trackedNamesMu.Unlock()
+	}
+	return err
 }
 
 // RemoveAllContainers removes all managed containers
@@ -159,4 +300,92 @@ func (t *ContainerToolImpl) GetContainerStats(ctx context.Context, containerID s
 // CloseRegistry releases all resources and removes all containers
 func (t *ContainerToolImpl) CloseRegistry() error {
 	return t.registry.Close()
+}
+
+// EmergencyCleanup performs an immediate forceful cleanup of all test containers
+// using direct Docker CLI commands for maximum reliability
+func (t *ContainerToolImpl) EmergencyCleanup() error {
+	// First try to use the registry's RemoveAll
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Try to clean up containers via registry
+	_ = t.registry.RemoveAll(ctx)
+
+	// Then perform a brute-force cleanup via Docker CLI
+	err := t.CleanupTestContainers()
+
+	// Reset the tracked IDs
+	t.trackedNamesMu.Lock()
+	t.trackedIDs = make(map[string]bool)
+	t.trackedNamesMu.Unlock()
+
+	return err
+}
+
+// EnsureNoTestContainers verifies that no test containers are left running
+func (t *ContainerToolImpl) EnsureNoTestContainers() error {
+	// Test container name patterns to look for
+	testPrefixes := []string{
+		"turingpi-test-",
+		"test-registry-",
+		"registry-test-",
+		"test-docker-",
+	}
+
+	for _, prefix := range testPrefixes {
+		// Find all containers with this prefix
+		cleanCmd := exec.Command("docker", "ps", "-a", "-q", "--filter", fmt.Sprintf("name=%s", prefix))
+		output, err := cleanCmd.Output()
+		if err == nil && len(output) > 0 {
+			containerList := strings.Split(strings.TrimSpace(string(output)), "\n")
+			if len(containerList) > 0 && containerList[0] != "" {
+				return fmt.Errorf("found %d test containers with prefix '%s' that were not cleaned up",
+					len(containerList), prefix)
+			}
+		}
+	}
+
+	return nil
+}
+
+// CleanupTestContainers removes any containers matching known test patterns
+func (t *ContainerToolImpl) CleanupTestContainers() error {
+	// Test container name patterns to look for
+	testPrefixes := []string{
+		"turingpi-test-",
+		"test-registry-",
+		"registry-test-",
+		"test-docker-",
+	}
+
+	var lastErr error
+	for _, prefix := range testPrefixes {
+		// Find all containers with this prefix
+		cleanCmd := exec.Command("docker", "ps", "-a", "-q", "--filter", fmt.Sprintf("name=%s", prefix))
+		output, err := cleanCmd.Output()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if len(output) > 0 {
+			containerList := strings.Split(strings.TrimSpace(string(output)), "\n")
+			for _, id := range containerList {
+				if id != "" {
+					rmCmd := exec.Command("docker", "rm", "-f", id)
+					if err := rmCmd.Run(); err != nil {
+						lastErr = err
+					} else {
+						// If removed successfully, remove from tracked IDs
+						t.trackedNamesMu.Lock()
+						delete(t.trackedIDs, id)
+						t.trackedNamesMu.Unlock()
+					}
+				}
+			}
+		}
+	}
+
+	return lastErr
 }

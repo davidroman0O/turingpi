@@ -115,7 +115,7 @@ func (a *TuringPiAction) GetNodeTool() (tools.NodeTool, error) {
 }
 
 // GetImageTool returns the image tool
-func (a *TuringPiAction) GetImageTool() (tools.ImageTool, error) {
+func (a *TuringPiAction) GetImageTool() (tools.OperationsTool, error) {
 	if a.toolsInitErr != nil {
 		return nil, a.toolsInitErr
 	}
@@ -148,7 +148,7 @@ func (a *TuringPiAction) GetCacheTool() (tools.CacheTool, error) {
 		return nil, a.toolsInitErr
 	}
 
-	cacheTool := a.tools.GetCacheTool()
+	cacheTool := a.tools.GetLocalCacheTool()
 	if cacheTool == nil {
 		return nil, errors.New("cache tool is not available")
 	}

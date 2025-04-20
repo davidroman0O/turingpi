@@ -14,9 +14,8 @@ import (
 type TuringPiToolProvider struct {
 	bmcTool         BMCTool
 	nodeTool        NodeTool
-	imageTool       ImageTool
+	imageTool       OperationsTool
 	containerTool   ContainerTool
-	cacheTool       CacheTool
 	localCacheTool  LocalCacheTool
 	remoteCacheTool RemoteCacheTool
 	fsTool          FSTool
@@ -29,7 +28,7 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 
 	// Initialize tools
 	if config.BMCExecutor != nil {
-		provider.bmcTool = NewBMCTool(config.BMCExecutor)
+		provider.bmcTool = bmc.New(config.BMCExecutor)
 	}
 
 	if config.CacheDir != "" {
@@ -37,7 +36,6 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 		if err != nil {
 			return nil, err
 		}
-		provider.cacheTool = NewCacheTool(fsCache)
 		provider.localCacheTool = NewLocalCacheTool(fsCache)
 	}
 
@@ -49,8 +47,14 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 		}
 	}
 
-	// Initialize image tool
-	provider.imageTool = NewImageTool(provider.containerTool)
+	// Initialize operations-based image tool
+	opsTool, err := NewOperationsTool(provider.containerTool)
+	if err != nil {
+		// Log the error but continue as this isn't critical
+		fmt.Printf("Warning: Failed to initialize operations tool: %v\n", err)
+	} else {
+		provider.imageTool = opsTool
+	}
 
 	// Initialize node tool if BMC is available
 	if provider.bmcTool != nil {
@@ -101,7 +105,7 @@ func (p *TuringPiToolProvider) GetNodeTool() NodeTool {
 }
 
 // GetImageTool returns the image tool
-func (p *TuringPiToolProvider) GetImageTool() ImageTool {
+func (p *TuringPiToolProvider) GetImageTool() OperationsTool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.imageTool
@@ -112,13 +116,6 @@ func (p *TuringPiToolProvider) GetContainerTool() ContainerTool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.containerTool
-}
-
-// GetCacheTool returns the cache tool
-func (p *TuringPiToolProvider) GetCacheTool() CacheTool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.cacheTool
 }
 
 // GetLocalCacheTool returns the local cache tool
