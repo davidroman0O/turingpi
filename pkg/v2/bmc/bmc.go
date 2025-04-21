@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +26,17 @@ func New(executor CommandExecutor) BMC {
 	return &bmcImpl{
 		executor: executor,
 	}
+}
+
+// NewWithSSH creates a new BMC instance that connects to a Turing Pi cluster via SSH
+// configPath is the path to the SSH configuration JSON file
+func NewWithSSH(configPath string) (BMC, error) {
+	executor, err := NewSSHExecutorFromConfig(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SSH executor: %w", err)
+	}
+
+	return New(executor), nil
 }
 
 // GetPowerStatus implements BMC interface
@@ -268,7 +281,7 @@ func (b *bmcImpl) waitForUARTOutput(ctx context.Context, nodeID int, buffer *byt
 // sendUARTData sends data to the node via UART
 func (b *bmcImpl) sendUARTData(ctx context.Context, nodeID int, data string) error {
 	escapedData := strings.ReplaceAll(data, "\"", "\\\"")
-	cmd := fmt.Sprintf("tpi uart --node %d set \"%s\"", nodeID, escapedData)
+	cmd := fmt.Sprintf("tpi uart --node %d set -c \"%s\"", nodeID, escapedData)
 	_, stderr, err := b.executor.ExecuteCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to send UART data: %w (stderr: %s)", err, stderr)
@@ -312,4 +325,167 @@ func getLastLines(s string, n int) string {
 		return s
 	}
 	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// PowerOnAll implements BMC interface
+func (b *bmcImpl) PowerOnAll(ctx context.Context) error {
+	_, stderr, err := b.executor.ExecuteCommand("tpi power on")
+	if err != nil {
+		return fmt.Errorf("failed to power on all nodes: %w (stderr: %s)", err, stderr)
+	}
+	return nil
+}
+
+// PowerOffAll implements BMC interface
+func (b *bmcImpl) PowerOffAll(ctx context.Context) error {
+	_, stderr, err := b.executor.ExecuteCommand("tpi power off")
+	if err != nil {
+		return fmt.Errorf("failed to power off all nodes: %w (stderr: %s)", err, stderr)
+	}
+	return nil
+}
+
+// ResetAll implements BMC interface
+func (b *bmcImpl) ResetAll(ctx context.Context) error {
+	_, stderr, err := b.executor.ExecuteCommand("tpi power reset")
+	if err != nil {
+		return fmt.Errorf("failed to reset all nodes: %w (stderr: %s)", err, stderr)
+	}
+	return nil
+}
+
+// GetUSBConfig implements BMC interface
+func (b *bmcImpl) GetUSBConfig(ctx context.Context) (*USBConfig, error) {
+	stdout, stderr, err := b.executor.ExecuteCommand("tpi usb get")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get USB configuration: %w (stderr: %s)", err, stderr)
+	}
+
+	// Parse the output to determine the node and host/device mode
+	config := &USBConfig{
+		NodeID: 0, // Default to no node
+		Host:   false,
+	}
+
+	// Example output: "USB routed to node 1 in host mode"
+	// or "USB routed to node 2 in device mode"
+	// or "USB is not routed to any node"
+	stdout = strings.TrimSpace(stdout)
+	if strings.Contains(stdout, "not routed") {
+		return config, nil
+	}
+
+	// Extract node ID
+	nodeMatch := regexp.MustCompile(`node (\d+)`).FindStringSubmatch(stdout)
+	if len(nodeMatch) >= 2 {
+		nodeID, err := strconv.Atoi(nodeMatch[1])
+		if err == nil && nodeID >= 1 && nodeID <= 4 {
+			config.NodeID = nodeID
+		}
+	}
+
+	// Determine host/device mode
+	config.Host = strings.Contains(stdout, "host mode")
+
+	return config, nil
+}
+
+// SetUSBConfig implements BMC interface
+func (b *bmcImpl) SetUSBConfig(ctx context.Context, nodeID int, host bool) error {
+	if nodeID < 0 || nodeID > 4 {
+		return fmt.Errorf("invalid node ID: %d (must be 0-4)", nodeID)
+	}
+
+	var cmd string
+	if nodeID == 0 {
+		// Disconnect USB
+		cmd = "tpi usb disconnect"
+	} else {
+		// Connect USB to the specified node in the specified mode
+		mode := "device"
+		if host {
+			mode = "host"
+		}
+		cmd = fmt.Sprintf("tpi usb --node %d %s", nodeID, mode)
+	}
+
+	_, stderr, err := b.executor.ExecuteCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to set USB configuration: %w (stderr: %s)", err, stderr)
+	}
+	return nil
+}
+
+// ResetEthSwitch implements BMC interface
+func (b *bmcImpl) ResetEthSwitch(ctx context.Context) error {
+	_, stderr, err := b.executor.ExecuteCommand("tpi eth reset")
+	if err != nil {
+		return fmt.Errorf("failed to reset Ethernet switch: %w (stderr: %s)", err, stderr)
+	}
+	return nil
+}
+
+// SetNodeMode implements BMC interface
+func (b *bmcImpl) SetNodeMode(ctx context.Context, nodeID int, mode NodeMode) error {
+	if nodeID < 1 || nodeID > 4 {
+		return fmt.Errorf("invalid node ID: %d (must be 1-4)", nodeID)
+	}
+
+	if mode != NodeModeNormal && mode != NodeModeMSD {
+		return fmt.Errorf("invalid node mode: %s (must be normal or msd)", mode)
+	}
+
+	cmd := fmt.Sprintf("tpi advanced --node %d %s", nodeID, mode)
+	_, stderr, err := b.executor.ExecuteCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to set node %d to mode %s: %w (stderr: %s)", nodeID, mode, err, stderr)
+	}
+	return nil
+}
+
+// FlashNode implements BMC interface
+func (b *bmcImpl) FlashNode(ctx context.Context, nodeID int, imagePath string) error {
+	if nodeID < 1 || nodeID > 4 {
+		return fmt.Errorf("invalid node ID: %d (must be 1-4)", nodeID)
+	}
+
+	if imagePath == "" {
+		return fmt.Errorf("image path cannot be empty")
+	}
+
+	cmd := fmt.Sprintf("tpi flash --node %d %s", nodeID, imagePath)
+	_, stderr, err := b.executor.ExecuteCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to flash node %d with image %s: %w (stderr: %s)", nodeID, imagePath, err, stderr)
+	}
+	return nil
+}
+
+// GetUARTOutput implements BMC interface
+func (b *bmcImpl) GetUARTOutput(ctx context.Context, nodeID int) (string, error) {
+	if nodeID < 1 || nodeID > 4 {
+		return "", fmt.Errorf("invalid node ID: %d (must be 1-4)", nodeID)
+	}
+
+	stdout, stderr, err := b.executor.ExecuteCommand(fmt.Sprintf("tpi uart --node %d get", nodeID))
+	if err != nil {
+		return "", fmt.Errorf("failed to get UART output from node %d: %w (stderr: %s)", nodeID, err, stderr)
+	}
+	return stdout, nil
+}
+
+// SendUARTInput implements BMC interface
+func (b *bmcImpl) SendUARTInput(ctx context.Context, nodeID int, input string) error {
+	if nodeID < 1 || nodeID > 4 {
+		return fmt.Errorf("invalid node ID: %d (must be 1-4)", nodeID)
+	}
+
+	// Escape quotes in the input
+	escapedInput := strings.ReplaceAll(input, "\"", "\\\"")
+	cmd := fmt.Sprintf("tpi uart --node %d set --cmd \"%s\"", nodeID, escapedInput)
+	_, stderr, err := b.executor.ExecuteCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to send UART input to node %d: %w (stderr: %s)", nodeID, err, stderr)
+	}
+	return nil
 }

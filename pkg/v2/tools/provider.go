@@ -118,10 +118,8 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 	provider := &TuringPiToolProvider{}
 
 	// Initialize tools
-	if config.BMCExecutor != nil {
-		bmcInstance := bmc.New(config.BMCExecutor)
-		provider.bmcTool = NewBMCToolAdapter(bmcInstance)
-	}
+	bmcInstance := bmc.New()
+	provider.bmcTool = NewBMCToolAdapter(bmcInstance)
 
 	if config.CacheDir != "" {
 		// Initialize the local cache directly
