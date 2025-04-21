@@ -8,8 +8,55 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/davidroman0O/gostate/store"
+	"github.com/davidroman0O/gostage/store"
 )
+
+// NodeID represents a compute node identifier
+type NodeID int
+
+// BoardType identifies the type of compute module
+type BoardType string
+
+// Predefined board types
+const (
+	RK1 BoardType = "rk1"
+	CM4 BoardType = "cm4"
+)
+
+// Node ID constants
+const (
+	Node1 NodeID = 1
+	Node2 NodeID = 2
+	Node3 NodeID = 3
+	Node4 NodeID = 4
+
+	// Special node ID for image preparation
+	NodePrepareID NodeID = 0
+)
+
+// NodeConfig holds the configuration for a single node
+type NodeConfig struct {
+	IP string `yaml:"ip"` // Static IP for the node
+}
+
+// TPIConfig holds the global configuration for the Turing Pi toolkit
+type TPIConfig struct {
+	// Cache directories
+	CacheDir      string `yaml:"cacheDir,omitempty"`      // Base directory for all caching
+	PrepImageDir  string `yaml:"prepImageDir,omitempty"`  // Directory for image preparation
+	StateFileName string `yaml:"stateFileName,omitempty"` // Name of the state file
+
+	// BMC configuration
+	BMCIP       string `yaml:"bmcIP"`       // IP address of the BMC
+	BMCUser     string `yaml:"bmcUser"`     // Username for BMC access
+	BMCPassword string `yaml:"bmcPassword"` // Password for BMC access
+
+	// Node configurations
+	Node1 *NodeConfig `yaml:"node1,omitempty"`
+	Node2 *NodeConfig `yaml:"node2,omitempty"`
+	Node3 *NodeConfig `yaml:"node3,omitempty"`
+	Node4 *NodeConfig `yaml:"node4,omitempty"`
+}
 
 // Config provides a configuration management system
 type Config struct {
@@ -37,10 +84,9 @@ func WithNamespace(ns string) Option {
 }
 
 // New creates a new configuration manager
-func New(filePath string, opts ...Option) (*Config, error) {
+func New(opts ...Option) (*Config, error) {
 	cfg := &Config{
-		store:    store.NewKVStore(),
-		filePath: filePath,
+		store: store.NewKVStore(),
 	}
 
 	// Apply options
@@ -49,8 +95,8 @@ func New(filePath string, opts ...Option) (*Config, error) {
 	}
 
 	// Create directory if it doesn't exist
-	if filePath != "" {
-		dir := filepath.Dir(filePath)
+	if cfg.filePath != "" {
+		dir := filepath.Dir(cfg.filePath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return nil, fmt.Errorf("failed to create config directory: %w", err)
 		}

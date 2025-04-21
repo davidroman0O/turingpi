@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
@@ -131,28 +132,34 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 		provider.localCache = fsCache
 	}
 
-	// Container tools depend on platform
-	if platform.DockerAvailable() {
+	// Initialize container tool if Docker is available
+	// Skip if TURINGPI_SKIP_DOCKER is set to true
+	skipDocker := os.Getenv("TURINGPI_SKIP_DOCKER") == "true"
+	if !skipDocker && platform.DockerAvailable() {
 		registry, err := container.NewDockerRegistry()
 		if err == nil {
 			provider.containerTool = NewContainerTool(registry)
 		}
 	}
 
-	// Initialize operations-based image tool
-	opsTool, err := NewOperationsTool(provider.containerTool)
-	if err != nil {
-		// Log the error but continue as this isn't critical
-		fmt.Printf("Warning: Failed to initialize operations tool: %v\n", err)
-	} else {
-		provider.imageTool = opsTool
+	// Initialize operations-based image tool (skip if Docker is skipped)
+	if !skipDocker && provider.containerTool != nil {
+		opsTool, err := NewOperationsTool(provider.containerTool)
+		if err != nil {
+			// Log the error but continue as this isn't critical
+			fmt.Printf("Warning: Failed to initialize operations tool: %v\n", err)
+		} else {
+			provider.imageTool = opsTool
+		}
+	} else if skipDocker {
+		fmt.Println("Skipping Docker and operations tools initialization as TURINGPI_SKIP_DOCKER=true")
 	}
 
 	// Initialize remote cache if remote config is provided
 	if config.RemoteCache != nil && config.RemoteCache.Host != "" {
 		sshConfig := cache.SSHConfig{
 			Host:     config.RemoteCache.Host,
-			Port:     22, // Default SSH port
+			Port:     config.RemoteCache.Port,
 			User:     config.RemoteCache.User,
 			Password: config.RemoteCache.Password,
 		}
@@ -217,6 +224,9 @@ type RemoteCacheConfig struct {
 
 	// RemotePath is the path on the remote system where cache will be stored
 	RemotePath string
+
+	// Port is the SSH port (default: 22)
+	Port int
 }
 
 // TuringPiToolConfig holds configuration for the TuringPiToolProvider

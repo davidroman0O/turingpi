@@ -389,3 +389,70 @@ func (t *ContainerToolImpl) CleanupTestContainers() error {
 
 	return lastErr
 }
+
+// ContainerToolAdapter adapts between the ContainerTool interface and the container.Registry interface
+type ContainerToolAdapter struct {
+	tool ContainerTool
+}
+
+// NewContainerToolAdapter creates a new adapter that converts a ContainerTool to a container.Registry
+func NewContainerToolAdapter(tool ContainerTool) container.Registry {
+	return &ContainerToolAdapter{
+		tool: tool,
+	}
+}
+
+// Create creates a new container
+func (a *ContainerToolAdapter) Create(ctx context.Context, config container.ContainerConfig) (container.Container, error) {
+	// Use the CreateContainer method from the ContainerTool interface
+	container, err := a.tool.CreateContainer(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Start the container (since Create is expected to create and start)
+	err = a.tool.StartContainer(ctx, container.ID())
+	if err != nil {
+		// Clean up if start fails
+		a.tool.RemoveContainer(ctx, container.ID())
+		return nil, err
+	}
+
+	return container, nil
+}
+
+// Get returns a container by ID
+func (a *ContainerToolAdapter) Get(ctx context.Context, id string) (container.Container, error) {
+	return a.tool.GetContainer(ctx, id)
+}
+
+// List returns all managed containers
+func (a *ContainerToolAdapter) List(ctx context.Context) ([]container.Container, error) {
+	return a.tool.ListContainers(ctx)
+}
+
+// Remove removes a container
+func (a *ContainerToolAdapter) Remove(ctx context.Context, id string) error {
+	return a.tool.RemoveContainer(ctx, id)
+}
+
+// RemoveAll removes all managed containers
+func (a *ContainerToolAdapter) RemoveAll(ctx context.Context) error {
+	return a.tool.RemoveAllContainers(ctx)
+}
+
+// Stats returns container statistics
+func (a *ContainerToolAdapter) Stats(ctx context.Context, id string) (*container.ContainerState, error) {
+	return a.tool.GetContainerStats(ctx, id)
+}
+
+// RegisterExistingContainer registers an existing container with the registry
+func (a *ContainerToolAdapter) RegisterExistingContainer(ctx context.Context, id string, config container.ContainerConfig) (container.Container, error) {
+	// There's no direct analog in ContainerTool, so we'll try to get the container
+	return a.tool.GetContainer(ctx, id)
+}
+
+// Close releases all resources and removes all containers
+func (a *ContainerToolAdapter) Close() error {
+	return a.tool.CloseRegistry()
+}

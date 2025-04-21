@@ -2,11 +2,8 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"io/fs"
-	"os"
 
-	"github.com/davidroman0O/turingpi/pkg/v2/container"
 	"github.com/davidroman0O/turingpi/pkg/v2/operations"
 )
 
@@ -22,73 +19,12 @@ type OperationsToolImpl struct {
 
 // NewOperationsTool creates a new OperationsTool
 func NewOperationsTool(containerTool ContainerTool) (OperationsTool, error) {
-	ctx := context.Background()
-	var containerInstance container.Container
-	var err error
+	// Adapt the ContainerTool to container.Registry
+	registryAdapter := NewContainerToolAdapter(containerTool)
 
-	// First try to get an existing container
-	containerInstance, err = containerTool.GetContainer(ctx, "turingpi-operations")
-
-	// If container doesn't exist, create it
-	if err != nil {
-		// Get current working directory
-		pwd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get current working directory: %w", err)
-		}
-
-		// Ensure the directory exists up the hierarchy to prevent mounting issues
-		os.MkdirAll(pwd, 0755)
-
-		// Create a new container for operations with proper volume mounts
-		containerConfig := container.ContainerConfig{
-			Name:       "turingpi-operations",
-			Image:      "ubuntu:latest",                     // Use a basic Linux image
-			Command:    []string{"tail", "-f", "/dev/null"}, // Keep container running indefinitely
-			Privileged: true,                                // Enable privileged mode for full filesystem access
-			Capabilities: []string{
-				"SYS_ADMIN", // Required for mount operations
-				"NET_ADMIN", // Additional permissions that might be needed
-				"MKNOD",     // Required for device operations
-			},
-			// Mount volumes with correct binding modes - read/write access
-			Mounts: map[string]string{
-				pwd: pwd, // Mount current working directory as read-write
-			},
-			// Set working directory to match host
-			WorkDir: pwd,
-		}
-
-		// Create the container
-		containerInstance, err = containerTool.CreateContainer(ctx, containerConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create operations container: %w", err)
-		}
-
-		// Start the container
-		if err := containerTool.StartContainer(ctx, containerInstance.ID()); err != nil {
-			// Clean up if start fails
-			containerTool.RemoveContainer(ctx, containerInstance.ID())
-			return nil, fmt.Errorf("failed to start operations container: %w", err)
-		}
-
-		// Verify container is working by checking if the volume mount works
-		// This ensures that if Docker can't properly mount volumes, we fail fast
-		output, err := containerTool.RunCommand(ctx, containerInstance.ID(), []string{"ls", "-la", pwd})
-		if err != nil {
-			// Cleanup on failure
-			containerTool.RemoveContainer(ctx, containerInstance.ID())
-			return nil, fmt.Errorf("container volume mount verification failed: %w", err)
-		}
-		if output == "" {
-			// Cleanup on failure
-			containerTool.RemoveContainer(ctx, containerInstance.ID())
-			return nil, fmt.Errorf("container mount appears empty, volume mounting may have failed")
-		}
-	}
-
-	// Create the appropriate executor (automatically handles platform differences)
-	executor := operations.NewExecutor(containerInstance)
+	// Create a container executor that creates temporary containers on demand
+	// instead of a persistent container
+	executor := operations.NewTemporaryContainerExecutor(registryAdapter)
 
 	return &OperationsToolImpl{
 		imageOps:       operations.NewImageOperations(executor),
