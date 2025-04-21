@@ -4,12 +4,10 @@ import (
 	"context"
 	"io"
 	"io/fs"
-	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/cache"
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
-	"github.com/davidroman0O/turingpi/pkg/v2/node"
 )
 
 // BMCTool provides an interface for interacting with the BMC (Board Management Controller)
@@ -30,6 +28,18 @@ type BMCTool interface {
 	UpdateFirmware(ctx context.Context, firmwarePath string) error
 	// ExecuteCommand executes a BMC-specific command
 	ExecuteCommand(ctx context.Context, command string) (stdout string, stderr string, err error)
+	// GetNodeUSBMode gets the USB mode for a specific node
+	GetNodeUSBMode(ctx context.Context, nodeID int) (string, error)
+	// SetNodeUSBMode sets the USB mode for a specific node
+	SetNodeUSBMode(ctx context.Context, nodeID int, mode string) error
+	// GetClusterHealth gets the health status of the entire cluster
+	GetClusterHealth(ctx context.Context) (map[string]interface{}, error)
+	// GetSerialConsole connects to the serial console of a specific node
+	GetSerialConsole(ctx context.Context, nodeID int) (io.ReadWriteCloser, error)
+	// SetBootMode sets the boot mode for a specific node
+	SetBootMode(ctx context.Context, nodeID int, mode string) error
+	// GetBootMode gets the current boot mode for a specific node
+	GetBootMode(ctx context.Context, nodeID int) (string, error)
 }
 
 // ContainerTool provides an interface for working with containers
@@ -114,24 +124,10 @@ type OperationsTool interface {
 	CompressGZ(ctx context.Context, sourcePath, outputGZ string) error
 }
 
-// NodeTool provides an interface for interacting with nodes
-type NodeTool interface {
-	// ExecuteCommand runs a non-interactive command on the target node via SSH
-	ExecuteCommand(ctx context.Context, nodeID int, command string) (stdout string, stderr string, err error)
-	// ExpectAndSend performs a sequence of expect/send interactions over an SSH session
-	ExpectAndSend(ctx context.Context, nodeID int, steps []node.InteractionStep, timeout time.Duration) (string, error)
-	// CopyFile copies a file to or from the node
-	CopyFile(ctx context.Context, nodeID int, localPath, remotePath string, toNode bool) error
-	// GetInfo retrieves detailed information about the node
-	GetInfo(ctx context.Context, nodeID int) (*node.NodeInfo, error)
-}
-
 // ToolProvider provides access to all the tools
 type ToolProvider interface {
 	// GetBMCTool returns the BMC tool
 	GetBMCTool() BMCTool
-	// GetNodeTool returns the node tool
-	GetNodeTool() NodeTool
 	// GetImageTool returns the image tool
 	GetImageTool() OperationsTool
 	// GetContainerTool returns the container tool

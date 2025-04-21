@@ -1,9 +1,12 @@
 package bmc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 )
 
 // bmcImpl implements the BMC interface
@@ -148,4 +151,165 @@ func (b *bmcImpl) UpdateFirmware(ctx context.Context, firmwarePath string) error
 // ExecuteCommand implements BMC interface
 func (b *bmcImpl) ExecuteCommand(ctx context.Context, command string) (string, string, error) {
 	return b.executor.ExecuteCommand(command)
+}
+
+// ExpectAndSend implements BMC interface
+func (b *bmcImpl) ExpectAndSend(ctx context.Context, nodeID int, steps []InteractionStep, timeout time.Duration) (string, error) {
+	if nodeID < 1 || nodeID > 4 {
+		return "", fmt.Errorf("invalid node ID: %d (must be 1-4)", nodeID)
+	}
+
+	// Create a buffer to capture all output
+	var outputBuffer bytes.Buffer
+
+	// Process each step in sequence
+	for i, step := range steps {
+		select {
+		case <-ctx.Done():
+			return outputBuffer.String(), ctx.Err()
+		default:
+			// Continue with the step
+		}
+
+		log.Printf("[BMC UART] Step %d: Expecting '%s'", i+1, step.Expect)
+
+		// If there's something to expect, wait for it
+		if step.Expect != "" {
+			if err := b.waitForUARTOutput(ctx, nodeID, &outputBuffer, step.Expect, timeout); err != nil {
+				log.Printf("[BMC UART] Output before error/timeout:\n%s", outputBuffer.String())
+				return outputBuffer.String(), fmt.Errorf("error waiting for '%s': %w", step.Expect, err)
+			}
+		}
+
+		// If there's something to send, send it
+		if step.Send != "" {
+			log.Printf("[BMC UART] Step %d: %s", i+1, step.LogMsg)
+
+			// Ensure the send data ends with a newline for proper command execution
+			sendData := step.Send
+			if !strings.HasSuffix(sendData, "\n") {
+				sendData += "\n"
+			}
+
+			// Send the data via UART
+			err := b.sendUARTData(ctx, nodeID, sendData)
+			if err != nil {
+				return outputBuffer.String(), fmt.Errorf("failed to send '%s': %w", step.Send, err)
+			}
+
+			// Add a small delay to ensure the command has time to be processed
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// Get any remaining output
+	if err := b.captureRemainingOutput(ctx, nodeID, &outputBuffer, 500*time.Millisecond); err != nil {
+		log.Printf("[BMC UART] Warning: error capturing final output: %v", err)
+	}
+
+	finalOutput := outputBuffer.String()
+	log.Printf("[BMC UART] Final output snippet:\n%s", getLastLines(finalOutput, 10))
+	log.Println("[BMC UART] Interaction sequence finished.")
+
+	return finalOutput, nil
+}
+
+// waitForUARTOutput repeatedly gets UART output and checks for the expected string
+func (b *bmcImpl) waitForUARTOutput(ctx context.Context, nodeID int, buffer *bytes.Buffer, expect string, timeout time.Duration) error {
+	if expect == "" {
+		return nil // Nothing to expect, return immediately
+	}
+
+	startTime := time.Now()
+	deadline := startTime.Add(timeout)
+
+	// Create a small buffer to compare with
+	var searchBuffer bytes.Buffer
+
+	// Keep checking for the expected string until timeout
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// Continue with the check
+		}
+
+		// Get the current UART output
+		stdout, stderr, err := b.executor.ExecuteCommand(fmt.Sprintf("tpi uart --node %d get", nodeID))
+		if err != nil {
+			return fmt.Errorf("failed to get UART output: %w (stderr: %s)", err, stderr)
+		}
+
+		// Write to both our buffers
+		buffer.WriteString(stdout)
+		searchBuffer.WriteString(stdout)
+
+		// Check if the expected string is in the output
+		if strings.Contains(searchBuffer.String(), expect) {
+			return nil // Found the expected string
+		}
+
+		// Don't let searchBuffer grow too large - keep last 8KB which should be
+		// enough to match multi-line patterns while preventing memory issues
+		if searchBuffer.Len() > 8192 {
+			data := searchBuffer.Bytes()
+			searchBuffer.Reset()
+			searchBuffer.Write(data[len(data)-4096:])
+		}
+
+		// Sleep a short duration before checking again
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return fmt.Errorf("timeout waiting for '%s'", expect)
+}
+
+// sendUARTData sends data to the node via UART
+func (b *bmcImpl) sendUARTData(ctx context.Context, nodeID int, data string) error {
+	escapedData := strings.ReplaceAll(data, "\"", "\\\"")
+	cmd := fmt.Sprintf("tpi uart --node %d set \"%s\"", nodeID, escapedData)
+	_, stderr, err := b.executor.ExecuteCommand(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to send UART data: %w (stderr: %s)", err, stderr)
+	}
+	return nil
+}
+
+// captureRemainingOutput captures any remaining output from UART
+func (b *bmcImpl) captureRemainingOutput(ctx context.Context, nodeID int, buffer *bytes.Buffer, duration time.Duration) error {
+	endTime := time.Now().Add(duration)
+
+	// Keep capturing for the specified duration
+	for time.Now().Before(endTime) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// Continue with capturing
+		}
+
+		stdout, _, err := b.executor.ExecuteCommand(fmt.Sprintf("tpi uart --node %d get", nodeID))
+		if err != nil {
+			return err
+		}
+
+		if stdout != "" {
+			buffer.WriteString(stdout)
+		}
+
+		// Sleep a short duration before capturing again
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return nil
+}
+
+// getLastLines returns the last n lines of a string
+func getLastLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
 }

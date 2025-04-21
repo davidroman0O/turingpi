@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockExecutor implements CommandExecutor for testing
@@ -32,6 +33,17 @@ func (m *mockExecutor) ExecuteCommand(command string) (string, string, error) {
 		return response.stdout, response.stderr, response.err
 	}
 
+	// Special handling for progressive UART get commands in tests
+	if strings.HasPrefix(command, "tpi uart --node ") && strings.Contains(command, " get") {
+		for cmd, response := range m.responses {
+			if strings.HasPrefix(cmd, "tpi uart --node ") &&
+				strings.Contains(cmd, " get-") &&
+				strings.HasPrefix(command, cmd[:strings.Index(cmd, "-")]) {
+				return response.stdout, response.stderr, response.err
+			}
+		}
+	}
+
 	// Try prefix match for commands with variable parts
 	for cmd, response := range m.responses {
 		if strings.HasPrefix(command, cmd) {
@@ -39,7 +51,7 @@ func (m *mockExecutor) ExecuteCommand(command string) (string, string, error) {
 		}
 	}
 
-	return "", "", fmt.Errorf("no mock response for command: %s", command)
+	return "", fmt.Errorf("no mock response for command: %s", command).Error(), fmt.Errorf("no mock response for command: %s", command)
 }
 
 func (m *mockExecutor) addResponse(command string, stdout, stderr string, err error) {
@@ -278,6 +290,200 @@ func TestBMC_PowerOperations(t *testing.T) {
 
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// Create a specialized sequence mock executor
+type sequenceMockExecutor struct {
+	*mockExecutor
+	sequence []struct {
+		command string
+		stdout  string
+		stderr  string
+		err     error
+	}
+	index int
+}
+
+func newSequenceMockExecutor() *sequenceMockExecutor {
+	return &sequenceMockExecutor{
+		mockExecutor: newMockExecutor(),
+		sequence: []struct {
+			command string
+			stdout  string
+			stderr  string
+			err     error
+		}{
+			// Initial state
+			{
+				command: "tpi uart --node 2 get",
+				stdout:  "Welcome to Node 2\nlogin: ",
+				stderr:  "",
+				err:     nil,
+			},
+			// After sending "root"
+			{
+				command: "tpi uart --node 2 get",
+				stdout:  "Welcome to Node 2\nlogin: root\nPassword: ",
+				stderr:  "",
+				err:     nil,
+			},
+			// After sending "password123"
+			{
+				command: "tpi uart --node 2 get",
+				stdout:  "Welcome to Node 2\nlogin: root\nPassword: password123\n# ",
+				stderr:  "",
+				err:     nil,
+			},
+			// After sending "echo 'test done'"
+			{
+				command: "tpi uart --node 2 get",
+				stdout:  "Welcome to Node 2\nlogin: root\nPassword: password123\n# echo 'test done'\ntest done\n# ",
+				stderr:  "",
+				err:     nil,
+			},
+		},
+		index: 0,
+	}
+}
+
+func (s *sequenceMockExecutor) ExecuteCommand(command string) (string, string, error) {
+	// For UART get commands, use the sequence
+	if command == "tpi uart --node 2 get" && s.index < len(s.sequence) {
+		item := s.sequence[s.index]
+		s.index++
+		return item.stdout, item.stderr, item.err
+	}
+
+	// For other commands, use the default implementation
+	return s.mockExecutor.ExecuteCommand(command)
+}
+
+func TestBMC_ExpectAndSend(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a sequence mock for successful tests
+	sequenceMock := newSequenceMockExecutor()
+	// Handle all UART set commands generically
+	sequenceMock.mockExecutor.addResponse("tpi uart --node 2 set", "", "", nil)
+
+	tests := []struct {
+		name     string
+		nodeID   int
+		steps    []InteractionStep
+		executor CommandExecutor
+		wantErr  bool
+		errMatch string
+	}{
+		{
+			name:   "successful interaction",
+			nodeID: 2,
+			steps: []InteractionStep{
+				{
+					Expect: "login:",
+					Send:   "root",
+					LogMsg: "Sending username",
+				},
+				{
+					Expect: "Password:",
+					Send:   "password123",
+					LogMsg: "Sending password",
+				},
+				{
+					Expect: "#",
+					Send:   "echo 'test done'",
+					LogMsg: "Running echo command",
+				},
+			},
+			executor: sequenceMock,
+		},
+		{
+			name:     "invalid node ID",
+			nodeID:   5,
+			steps:    []InteractionStep{},
+			executor: newMockExecutor(),
+			wantErr:  true,
+			errMatch: "invalid node ID",
+		},
+		{
+			name:   "UART get error",
+			nodeID: 2,
+			steps: []InteractionStep{
+				{
+					Expect: "login:",
+					Send:   "root",
+					LogMsg: "Sending username",
+				},
+			},
+			executor: func() CommandExecutor {
+				mock := newMockExecutor()
+				mock.addResponse("tpi uart --node 2 get", "", "UART error", fmt.Errorf("failed to get UART data"))
+				return mock
+			}(),
+			wantErr:  true,
+			errMatch: "failed to get UART output",
+		},
+		{
+			name:   "UART set error",
+			nodeID: 2,
+			steps: []InteractionStep{
+				{
+					Expect: "login:",
+					Send:   "root",
+					LogMsg: "Sending username",
+				},
+			},
+			executor: func() CommandExecutor {
+				mock := newMockExecutor()
+				mock.addResponse("tpi uart --node 2 get", "Welcome to Node 2\nlogin: ", "", nil)
+				mock.addResponse("tpi uart --node 2 set", "", "UART error", fmt.Errorf("failed to set UART data"))
+				return mock
+			}(),
+			wantErr:  true,
+			errMatch: "failed to send UART data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bmc := New(tt.executor)
+
+			// Use a longer timeout for more reliable tests
+			timeout := 50 * time.Millisecond
+
+			output, err := bmc.ExpectAndSend(ctx, tt.nodeID, tt.steps, timeout)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error but got none")
+				} else if tt.errMatch != "" && !strings.Contains(err.Error(), tt.errMatch) {
+					t.Errorf("error %q does not contain %q", err.Error(), tt.errMatch)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			// For successful test, verify expected output parts
+			if tt.name == "successful interaction" {
+				expectedParts := []string{
+					"Welcome to Node 2",
+					"login: root",
+					"Password: password123",
+					"echo 'test done'",
+					"test done",
+				}
+
+				for _, part := range expectedParts {
+					if !strings.Contains(output, part) {
+						t.Errorf("output missing expected part %q\nGot: %q", part, output)
+					}
+				}
 			}
 		})
 	}

@@ -55,22 +55,11 @@ func TestTuringPiToolProvider_Caches(t *testing.T) {
 	// Create a mock BMC executor for the node tool
 	mockBMC := &mockBMCExecutor{}
 
-	// Create a node configuration for the remote cache
-	nodeConfig := &tools.NodeConfig{
-		Host:     sshConfig.Host,
-		User:     sshConfig.User,
-		Password: sshConfig.Password,
-	}
-
 	// Create the tool provider configuration
 	providerConfig := &tools.TuringPiToolConfig{
 		BMCExecutor: mockBMC,
 		CacheDir:    tempDir,
-		NodeConfigs: map[int]*tools.NodeConfig{
-			1: nodeConfig,
-		},
 		RemoteCache: &tools.RemoteCacheConfig{
-			NodeID:     1,
 			Host:       sshConfig.Host,
 			User:       sshConfig.User,
 			Password:   sshConfig.Password,
@@ -258,7 +247,6 @@ func TestTuringPiToolProvider_InitializationErrors(t *testing.T) {
 			BMCExecutor: &mockBMCExecutor{},
 			CacheDir:    tempDir,
 			RemoteCache: &tools.RemoteCacheConfig{
-				NodeID:     1,
 				Host:       "nonexistent.host.invalid",
 				User:       "invalid",
 				Password:   "invalid",

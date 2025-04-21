@@ -1,6 +1,9 @@
 package bmc
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // PowerState represents the power state of a node
 type PowerState string
@@ -28,6 +31,16 @@ type BMCInfo struct {
 	Version      string
 }
 
+// InteractionStep represents a single step in an expect-and-send interaction sequence
+type InteractionStep struct {
+	// Expect is the string to wait for before sending the next command
+	Expect string
+	// Send is the string to send after Expect is found
+	Send string
+	// LogMsg is a message to log when this step is performed
+	LogMsg string
+}
+
 // BMC defines the interface for interacting with the Board Management Controller
 type BMC interface {
 	// GetPowerStatus retrieves the power status of a specific node
@@ -53,4 +66,10 @@ type BMC interface {
 
 	// ExecuteCommand executes a BMC-specific command
 	ExecuteCommand(ctx context.Context, command string) (stdout string, stderr string, err error)
+
+	// ExpectAndSend performs an interactive session with a node via UART
+	// nodeID is the node to interact with (1-4)
+	// steps is the sequence of expect-and-send steps to perform
+	// timeout is the maximum time to wait for each expected string
+	ExpectAndSend(ctx context.Context, nodeID int, steps []InteractionStep, timeout time.Duration) (string, error)
 }
