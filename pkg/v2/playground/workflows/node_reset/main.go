@@ -123,7 +123,7 @@ func main() {
 	toolConfig := &tools.TuringPiToolConfig{
 		BMCExecutor: bmcExecutor,
 		CacheDir:    *cacheDir,
-		RemoteCache: &tools.RemoteCacheConfig{
+		SSH: &tools.SSHConfig{
 			Host:       sshConfig.Host,
 			User:       sshConfig.User,
 			Password:   sshConfig.Password,

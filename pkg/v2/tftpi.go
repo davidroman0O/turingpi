@@ -3,51 +3,13 @@ package tftpi
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"strings"
 
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/gostage/store"
+	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/config"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
 )
-
-// ShellBMCExecutor implements the bmc.CommandExecutor interface using local shell commands
-type ShellBMCExecutor struct {
-	bmcIP       string
-	bmcUsername string
-	bmcPassword string
-}
-
-// ExecuteCommand runs a command for BMC operations
-func (e *ShellBMCExecutor) ExecuteCommand(cmd string) (string, string, error) {
-	// Create the command with the BMC credentials
-	shellCmd := fmt.Sprintf("export BMC_IP=%s BMC_USER=%s BMC_PASS=%s && %s",
-		e.bmcIP, e.bmcUsername, e.bmcPassword, cmd)
-
-	// Execute the command
-	execCmd := exec.Command("sh", "-c", shellCmd)
-	output, err := execCmd.CombinedOutput()
-	outputStr := string(output)
-
-	// Split output into stdout and stderr (simplistic approach)
-	parts := strings.Split(outputStr, "\n")
-	stdoutLines := []string{}
-	stderrLines := []string{}
-
-	for _, line := range parts {
-		if strings.HasPrefix(line, "ERROR:") || strings.HasPrefix(line, "WARN:") {
-			stderrLines = append(stderrLines, line)
-		} else {
-			stdoutLines = append(stdoutLines, line)
-		}
-	}
-
-	stdout := strings.Join(stdoutLines, "\n")
-	stderr := strings.Join(stderrLines, "\n")
-
-	return stdout, stderr, err
-}
 
 // TuringPiProvider is the main entry point for the Turing Pi toolkit
 type TuringPiProvider struct {
@@ -148,12 +110,20 @@ func (t *TuringPiProvider) initializeToolProviders() error {
 	}
 
 	for i, cluster := range t.configFile.Clusters {
-		// Create BMC executor for this cluster
-		bmcExecutor := &ShellBMCExecutor{
-			bmcIP:       cluster.BMC.IP,
-			bmcUsername: cluster.BMC.Username,
-			bmcPassword: cluster.BMC.Password,
+
+		if cluster.BMC.IP == "" {
+			return fmt.Errorf("cluster %s has no BMC IP address", cluster.Name)
 		}
+
+		if cluster.BMC.Username == "" {
+			return fmt.Errorf("cluster %s has no BMC username", cluster.Name)
+		}
+
+		if cluster.BMC.Password == "" {
+			return fmt.Errorf("cluster %s has no BMC password", cluster.Name)
+		}
+		// Create BMC executor for this cluster
+		bmcExecutor := bmc.NewSSHExecutor(cluster.BMC.IP, 22, cluster.BMC.Username, cluster.BMC.Password)
 
 		// Determine cache directory - cluster override or global
 		cacheDir := globalCacheDir

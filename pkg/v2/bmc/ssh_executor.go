@@ -47,6 +47,18 @@ func NewSSHExecutorFromConfig(configPath string) (CommandExecutor, error) {
 	}, nil
 }
 
+// NewSSHExecutor creates a new SSHExecutor from direct connection parameters
+func NewSSHExecutor(host string, port int, user, password string) CommandExecutor {
+	return &SSHExecutor{
+		config: SSHConfig{
+			Host:     host,
+			Port:     port,
+			User:     user,
+			Password: password,
+		},
+	}
+}
+
 // ExecuteCommand implements CommandExecutor interface by running commands over SSH
 func (s *SSHExecutor) ExecuteCommand(command string) (stdout string, stderr string, err error) {
 	// Build the SSH command
