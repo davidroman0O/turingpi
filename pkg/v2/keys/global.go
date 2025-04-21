@@ -38,6 +38,8 @@ const (
 	CurrentNodeID = "turingpi.workflow.current_node" // Currently targeted node ID
 	TargetNodes   = "turingpi.workflow.target_nodes" // List of nodes to operate on
 	WorkflowState = "turingpi.workflow.state"        // Overall workflow state
+
+	ToolsProvider = "turingpi.tools"
 )
 
 // FormatKey formats a key with its parameters

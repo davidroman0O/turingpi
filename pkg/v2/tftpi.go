@@ -8,6 +8,7 @@ import (
 	"github.com/davidroman0O/gostage/store"
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/config"
+	"github.com/davidroman0O/turingpi/pkg/v2/keys"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
 )
 
@@ -110,7 +111,7 @@ func (t *TuringPiProvider) initializeToolProviders() error {
 	}
 
 	for i, cluster := range t.configFile.Clusters {
-
+		// BMC config is required
 		if cluster.BMC.IP == "" {
 			return fmt.Errorf("cluster %s has no BMC IP address", cluster.Name)
 		}
@@ -137,55 +138,22 @@ func (t *TuringPiProvider) initializeToolProviders() error {
 			CacheDir:    cacheDir,
 		}
 
-		// Use first node's SSH config for remote cache if available
-		var remoteNode *config.ClusterNodeConfig
-		if len(cluster.Nodes) > 0 {
-			remoteNode = &cluster.Nodes[0]
+		// Set up remote cache using BMC connection details
+		// BMC and cluster controller are typically the same device
+		remotePath := "/var/cache/turingpi" // Default remote path
+		if cluster.Cache != nil && cluster.Cache.RemoteDir != "" {
+			remotePath = cluster.Cache.RemoteDir
+		} else if t.configFile.Global.Cache.RemoteDir != "" {
+			remotePath = t.configFile.Global.Cache.RemoteDir
 		}
 
-		// Set up remote cache if we have a node with IP
-		if remoteNode != nil && remoteNode.IP != "" {
-			var sshUser, sshPassword string
-
-			// Note: SSH port is available in configs but RemoteCacheConfig doesn't have a Port field
-			// In a real implementation, the port would be passed to the SSH client configuration
-
-			// Use node-specific SSH config if available
-			if remoteNode.SSH != nil {
-				sshUser = remoteNode.SSH.User
-				sshPassword = remoteNode.SSH.Password
-				// Port is available here but we can't use it directly
-				// if remoteNode.SSH.Port > 0 {
-				//     sshPort = remoteNode.SSH.Port
-				// }
-			} else if t.configFile.Global.DefaultSSH != nil {
-				// Fall back to global SSH config
-				sshUser = t.configFile.Global.DefaultSSH.User
-				sshPassword = t.configFile.Global.DefaultSSH.Password
-				// Port is available here too
-				// if t.configFile.Global.DefaultSSH.Port > 0 {
-				//     sshPort = t.configFile.Global.DefaultSSH.Port
-				// }
-			} else {
-				// Use reasonable defaults
-				sshUser = "root"
-			}
-
-			// Determine remote path
-			remotePath := "/var/cache/turingpi"
-			if cluster.Cache != nil && cluster.Cache.RemoteDir != "" {
-				remotePath = cluster.Cache.RemoteDir
-			} else if t.configFile.Global.Cache.RemoteDir != "" {
-				remotePath = t.configFile.Global.Cache.RemoteDir
-			}
-
-			// Configure remote cache
-			toolConfig.RemoteCache = &tools.RemoteCacheConfig{
-				Host:       remoteNode.IP,
-				User:       sshUser,
-				Password:   sshPassword,
-				RemotePath: remotePath,
-			}
+		// Configure remote cache using BMC credentials - simpler and more direct approach
+		toolConfig.RemoteCache = &tools.RemoteCacheConfig{
+			Host:       cluster.BMC.IP,       // Use BMC IP for SSH
+			User:       cluster.BMC.Username, // Use BMC username
+			Password:   cluster.BMC.Password, // Use BMC password
+			RemotePath: remotePath,
+			Port:       22, // Default SSH port
 		}
 
 		// Create a tool provider for this cluster
@@ -222,20 +190,50 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 		return fmt.Errorf("cluster '%s' not found", clusterName)
 	}
 
+	// Add verbose logging about the provider and its BMC tool
+	logger.Info("Provider before storing in workflow: %v", provider)
+	logger.Info("BMC tool before storing (should not be nil): %v", provider.GetBMCTool())
+
+	// Validate that the provider has a working BMC tool
+	if provider.GetBMCTool() == nil {
+		logger.Error("BMC tool is nil in the provider - this indicates an initialization problem")
+
+		// Print provider details
+		logger.Info("Provider details - BMC tool: %v, Image tool: %v, Container tool: %v, LocalCache: %v, RemoteCache: %v",
+			provider.GetBMCTool() != nil,
+			provider.GetImageTool() != nil,
+			provider.GetContainerTool() != nil,
+			provider.GetLocalCache() != nil,
+			provider.GetRemoteCache() != nil)
+
+		return fmt.Errorf("BMC tool is not initialized in the provider")
+	}
+
 	// Validate the node ID
 	if nodeID <= 0 {
 		return fmt.Errorf("invalid node ID: %d, must be greater than 0", nodeID)
 	}
 
-	// Important: Add the tool provider directly to the workflow store first
+	// Add the tool provider directly to the workflow store
 	// This ensures it's available immediately for the workflow
-	workflow.Store.Put("$tools", provider)
+	workflow.Store.Put(keys.ToolsProvider, provider)
+
+	// Verify the provider was correctly stored by retrieving it again
+	storedProvider, err := store.Get[*tools.TuringPiToolProvider](workflow.Store, keys.ToolsProvider)
+	if err != nil {
+		logger.Error("Failed to retrieve stored provider: %v", err)
+	} else {
+		logger.Info("Provider after storing and retrieving: %v", storedProvider)
+		logger.Info("BMC tool after storing (should not be nil): %v", storedProvider.GetBMCTool())
+
+		// Double-check BMC tool is not nil
+		if storedProvider.GetBMCTool() == nil {
+			logger.Error("BMC tool is nil after storing! Store may be performing a shallow copy")
+		}
+	}
 
 	// Set the current node as the target node for all actions
-	workflow.Store.Put("turingpi.workflow.current_node", nodeID)
-
-	// Create a store with only the configuration for the target cluster and node
-	filteredStore := store.NewKVStore()
+	workflow.Store.Put(keys.CurrentNodeID, nodeID)
 
 	// Find the cluster and its index
 	var clusterIndex int
@@ -253,24 +251,21 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 		return fmt.Errorf("failed to find configuration for cluster '%s'", clusterName)
 	}
 
-	// Add the target cluster's configuration
+	// Add the target cluster's configuration directly to the workflow store
 	clusterPrefix := fmt.Sprintf("turingpi.cluster.%d", clusterIndex)
 
 	// Store cluster details
-	filteredStore.Put(fmt.Sprintf("%s.name", clusterPrefix), targetClusterConfig.Name)
+	workflow.Store.Put(fmt.Sprintf("%s.name", clusterPrefix), targetClusterConfig.Name)
 
 	// Store BMC details
 	bmcPrefix := fmt.Sprintf("%s.bmc", clusterPrefix)
-	filteredStore.Put(fmt.Sprintf("%s.ip", bmcPrefix), targetClusterConfig.BMC.IP)
-	filteredStore.Put(fmt.Sprintf("%s.user", bmcPrefix), targetClusterConfig.BMC.Username)
-	filteredStore.Put(fmt.Sprintf("%s.password", bmcPrefix), targetClusterConfig.BMC.Password)
+	workflow.Store.Put(fmt.Sprintf("%s.ip", bmcPrefix), targetClusterConfig.BMC.IP)
+	workflow.Store.Put(fmt.Sprintf("%s.user", bmcPrefix), targetClusterConfig.BMC.Username)
+	workflow.Store.Put(fmt.Sprintf("%s.password", bmcPrefix), targetClusterConfig.BMC.Password)
 
 	// Store the active cluster and tool provider for easy access
-	filteredStore.Put("turingpi.targetCluster", clusterName)
-	filteredStore.Put("turingpi.clusterIndex", clusterIndex)
-
-	// Store the current node for all actions
-	filteredStore.Put("turingpi.workflow.current_node", nodeID)
+	workflow.Store.Put("turingpi.targetCluster", clusterName)
+	workflow.Store.Put("turingpi.clusterIndex", clusterIndex)
 
 	// Add specific node information if available in the config
 	var foundNode bool
@@ -279,10 +274,10 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 			nodePrefix := fmt.Sprintf("turingpi.node.%d", nodeID)
 
 			// Store node details
-			filteredStore.Put(fmt.Sprintf("%s.name", nodePrefix), node.Name)
-			filteredStore.Put(fmt.Sprintf("%s.ip", nodePrefix), node.IP)
-			filteredStore.Put(fmt.Sprintf("%s.board", nodePrefix), string(node.Board))
-			filteredStore.Put(fmt.Sprintf("%s.cluster", nodePrefix), targetClusterConfig.Name)
+			workflow.Store.Put(fmt.Sprintf("%s.name", nodePrefix), node.Name)
+			workflow.Store.Put(fmt.Sprintf("%s.ip", nodePrefix), node.IP)
+			workflow.Store.Put(fmt.Sprintf("%s.board", nodePrefix), string(node.Board))
+			workflow.Store.Put(fmt.Sprintf("%s.cluster", nodePrefix), targetClusterConfig.Name)
 
 			foundNode = true
 			break
@@ -295,17 +290,8 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 			nodeID, clusterName)
 	}
 
-	// We already put this directly in the workflow store for immediate availability
-	filteredStore.Put("$tools", provider)
-
-	// Inject the filtered configuration into the workflow store
-	copied, overwritten, err := workflow.Store.CopyFromWithOverwrite(filteredStore)
-	if err != nil {
-		return fmt.Errorf("failed to inject configuration: %w", err)
-	}
-
-	logger.Info("Injected %d configuration values for cluster '%s', node %d (%d existing values overwritten)",
-		copied, clusterName, nodeID, overwritten)
+	logger.Info("Injected configuration values for cluster '%s', node %d",
+		clusterName, nodeID)
 
 	// Execute workflow
 	return t.Runner.Execute(ctx, workflow, logger)
@@ -318,7 +304,7 @@ func (t *TuringPiProvider) GetToolProvider(clusterName string) *tools.TuringPiTo
 
 // GetClusterNodes returns the list of node IDs in the targeted cluster
 func GetClusterNodes(ctx *gostage.ActionContext) ([]int, error) {
-	nodeIDs, err := store.Get[[]int](ctx.Store, "turingpi.clusterNodes")
+	nodeIDs, err := store.Get[[]int](ctx.Store(), "turingpi.clusterNodes")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cluster nodes: %w", err)
 	}

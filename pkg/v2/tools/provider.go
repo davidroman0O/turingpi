@@ -175,6 +175,26 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 		}
 	}
 
+	if provider.bmcTool == nil {
+		return nil, fmt.Errorf("BMC tool is not initialized")
+	}
+
+	if provider.imageTool == nil {
+		return nil, fmt.Errorf("image tool is not initialized")
+	}
+
+	if provider.containerTool == nil {
+		return nil, fmt.Errorf("container tool is not initialized")
+	}
+
+	if provider.localCache == nil {
+		return nil, fmt.Errorf("local cache is not initialized")
+	}
+
+	if provider.remoteCache == nil {
+		return nil, fmt.Errorf("remote cache is not initialized")
+	}
+
 	return provider, nil
 }
 
