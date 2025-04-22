@@ -3,7 +3,6 @@ package operations
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,108 +23,42 @@ func NewCompressionOperations(executor CommandExecutor) *CompressionOperations {
 // DecompressXZ decompresses an XZ-compressed file to the specified directory
 // Returns the path to the decompressed file
 func (c *CompressionOperations) DecompressXZ(ctx context.Context, sourceXZPath, outputDir string) (string, error) {
-	// Add debug output to inspect paths
-	fmt.Printf("DEBUG DecompressXZ: sourceXZPath=%s, outputDir=%s\n", sourceXZPath, outputDir)
-
 	// Ensure source file exists
-	testOutput, err := c.executor.Execute(ctx, "test", "-f", sourceXZPath)
-	if err != nil {
-		// Add debug output for test failure
-		fmt.Printf("DEBUG DecompressXZ: source file test failed: %v, output: %s\n", err, string(testOutput))
-
-		// Try to list the directory to debug
-		lsOutput, lsErr := c.executor.Execute(ctx, "ls", "-la", filepath.Dir(sourceXZPath))
-		if lsErr == nil {
-			fmt.Printf("DEBUG DecompressXZ: directory contents: %s\n", string(lsOutput))
-		} else {
-			fmt.Printf("DEBUG DecompressXZ: ls failed: %v\n", lsErr)
-		}
-
+	if _, err := c.executor.Execute(ctx, "test", "-f", sourceXZPath); err != nil {
 		return "", fmt.Errorf("source file does not exist: %s", sourceXZPath)
 	}
 
-	fmt.Printf("DEBUG DecompressXZ: Source file exists\n")
-
 	// Create output directory if it doesn't exist
-	mkdirOutput, err := c.executor.Execute(ctx, "mkdir", "-p", outputDir)
-	if err != nil {
-		fmt.Printf("DEBUG DecompressXZ: mkdir failed: %v, output: %s\n", err, string(mkdirOutput))
+	if _, err := c.executor.Execute(ctx, "mkdir", "-p", outputDir); err != nil {
 		return "", fmt.Errorf("failed to create output directory: %w", err)
 	}
 
 	// Generate output file path
 	outputPath := filepath.Join(outputDir, strings.TrimSuffix(filepath.Base(sourceXZPath), ".xz"))
-	fmt.Printf("DEBUG DecompressXZ: outputPath=%s\n", outputPath)
 
-	// Use xz directly instead of through bash, more compatible with Alpine/BusyBox
-	// First try the direct command
-	xzOutput, err := c.executor.Execute(ctx, "xz", "-d", "-k", "-f", sourceXZPath)
-	if err == nil {
-		fmt.Printf("DEBUG DecompressXZ: xz command succeeded\n")
-		// Direct command worked, check if file exists at expected location
-		testOutput, testErr := c.executor.Execute(ctx, "test", "-f", strings.TrimSuffix(sourceXZPath, ".xz"))
-		if testErr == nil {
-			fmt.Printf("DEBUG DecompressXZ: Decompressed file exists at %s\n", strings.TrimSuffix(sourceXZPath, ".xz"))
-			// If decompression created file in source directory, move it to target
-			if outputPath != strings.TrimSuffix(sourceXZPath, ".xz") {
-				mvOutput, err := c.executor.Execute(ctx, "mv", strings.TrimSuffix(sourceXZPath, ".xz"), outputPath)
-				if err != nil {
-					fmt.Printf("DEBUG DecompressXZ: mv failed: %v, output: %s\n", err, string(mvOutput))
-					return "", fmt.Errorf("failed to move decompressed file: %w", err)
-				}
-				fmt.Printf("DEBUG DecompressXZ: Moved file to %s\n", outputPath)
-			}
-			return outputPath, nil
-		} else {
-			fmt.Printf("DEBUG DecompressXZ: Decompressed file test failed: %v, output: %s\n", testErr, string(testOutput))
-		}
-	} else {
-		fmt.Printf("DEBUG DecompressXZ: direct xz command failed: %v, output: %s\n", err, string(xzOutput))
-	}
+	// Generate a temporary file path
+	tempFile := filepath.Join(outputDir, fmt.Sprintf("%s.tmp.%d", filepath.Base(outputPath), time.Now().UnixNano()))
 
-	// Try alternate approach without -f flag
-	xzOutput, err = c.executor.Execute(ctx, "xz", "--decompress", "--keep", "--stdout", sourceXZPath)
-	if err == nil && len(xzOutput) > 0 {
-		fmt.Printf("DEBUG DecompressXZ: xz with stdout succeeded, output size: %d bytes\n", len(xzOutput))
-		// Create a temporary file with the content
-		tempFile := fmt.Sprintf("%s.tmp.%d", outputPath, time.Now().UnixNano())
-
-		// Write the output to a file
-		if err := os.WriteFile(tempFile, xzOutput, 0644); err != nil {
-			fmt.Printf("DEBUG DecompressXZ: Failed to write temp file: %v\n", err)
-			return "", fmt.Errorf("failed to write decompressed content: %w", err)
-		}
-
-		// Move the file to its final destination
-		if err := os.Rename(tempFile, outputPath); err != nil {
-			fmt.Printf("DEBUG DecompressXZ: Failed to rename temp file: %v\n", err)
-			return "", fmt.Errorf("failed to move temp file to destination: %w", err)
-		}
-
-		fmt.Printf("DEBUG DecompressXZ: Successfully wrote decompressed file to %s\n", outputPath)
-		return outputPath, nil
-	} else if err != nil {
-		fmt.Printf("DEBUG DecompressXZ: xz stdout approach failed: %v\n", err)
-	}
-
-	// If direct approach failed, try with shell redirection as fallback
-	// Use sh instead of bash for better compatibility with minimal containers
-	shCmd := fmt.Sprintf("xz -d -c %s > %s", sourceXZPath, outputPath)
-	fmt.Printf("DEBUG DecompressXZ: Trying shell command: %s\n", shCmd)
-	output, err := c.executor.Execute(ctx, "sh", "-c", shCmd)
+	// Use xz with --stdout and redirect to the temporary file
+	// This is the most reliable approach across different environments
+	cmd := fmt.Sprintf("xz --decompress --keep --stdout %s > %s", sourceXZPath, tempFile)
+	output, err := c.executor.Execute(ctx, "sh", "-c", cmd)
 	if err != nil {
-		fmt.Printf("DEBUG DecompressXZ: sh command failed: %v, output: %s\n", err, string(output))
 		return "", fmt.Errorf("xz decompression failed: %w, output: %s", err, string(output))
 	}
 
-	// Verify the file was created successfully
-	testOutput, err = c.executor.Execute(ctx, "test", "-f", outputPath)
-	if err != nil {
-		fmt.Printf("DEBUG DecompressXZ: final file test failed: %v, output: %s\n", err, string(testOutput))
-		return "", fmt.Errorf("decompressed file not found at %s", outputPath)
+	// Verify the temp file was created successfully
+	if _, err := c.executor.Execute(ctx, "test", "-f", tempFile); err != nil {
+		return "", fmt.Errorf("decompressed temp file not found at %s", tempFile)
 	}
 
-	fmt.Printf("DEBUG DecompressXZ: Successfully decompressed to %s\n", outputPath)
+	// Move the temp file to final destination
+	if _, err := c.executor.Execute(ctx, "mv", tempFile, outputPath); err != nil {
+		// Try to clean up the temp file
+		_, _ = c.executor.Execute(ctx, "rm", "-f", tempFile)
+		return "", fmt.Errorf("failed to move temp file to destination: %w", err)
+	}
+
 	return outputPath, nil
 }
 
@@ -143,32 +76,30 @@ func (c *CompressionOperations) CompressXZ(ctx context.Context, sourcePath, outp
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// First try direct command with xz that works on most systems
-	_, err := c.executor.Execute(ctx, "xz", "-9", "-k", "-c", sourcePath)
-	if err == nil {
-		// If xz command succeeded but file is in wrong location, handle that case
-		if _, err := c.executor.Execute(ctx, "test", "-f", sourcePath+".xz"); err == nil {
-			// Move from source+.xz to target path if different
-			if sourcePath+".xz" != outputXZPath {
-				_, err := c.executor.Execute(ctx, "mv", sourcePath+".xz", outputXZPath)
-				if err != nil {
-					return fmt.Errorf("failed to move compressed file: %w", err)
-				}
-			}
-			return nil
-		}
-	}
+	// Generate a temporary file path
+	tempFile := filepath.Join(outputDir, fmt.Sprintf("%s.tmp.%d", filepath.Base(outputXZPath), time.Now().UnixNano()))
 
-	// Fallback to using shell redirection if direct command didn't work
-	shCmd := fmt.Sprintf("xz -9 -c %s > %s", sourcePath, outputXZPath)
-	output, err := c.executor.Execute(ctx, "sh", "-c", shCmd)
+	// Use xz with -zck6 flags and redirect to the temporary file
+	// -z: force compression
+	// -c: write to stdout
+	// -k: keep input file
+	// -6: compression level 6 (medium, good balance of speed and compression)
+	cmd := fmt.Sprintf("xz -zck6 %s > %s", sourcePath, tempFile)
+	output, err := c.executor.Execute(ctx, "sh", "-c", cmd)
 	if err != nil {
 		return fmt.Errorf("xz compression failed: %w, output: %s", err, string(output))
 	}
 
-	// Verify the file was created successfully
-	if _, err := c.executor.Execute(ctx, "test", "-f", outputXZPath); err != nil {
-		return fmt.Errorf("compressed file not found at %s", outputXZPath)
+	// Verify the temp file was created successfully
+	if _, err := c.executor.Execute(ctx, "test", "-f", tempFile); err != nil {
+		return fmt.Errorf("compressed temp file not found at %s", tempFile)
+	}
+
+	// Move the temp file to final destination
+	if _, err := c.executor.Execute(ctx, "mv", tempFile, outputXZPath); err != nil {
+		// Try to clean up the temp file
+		_, _ = c.executor.Execute(ctx, "rm", "-f", tempFile)
+		return fmt.Errorf("failed to move temp file to destination: %w", err)
 	}
 
 	return nil
@@ -190,32 +121,26 @@ func (c *CompressionOperations) DecompressGZ(ctx context.Context, sourceGZPath, 
 	// Generate output file path
 	outputPath := filepath.Join(outputDir, strings.TrimSuffix(filepath.Base(sourceGZPath), ".gz"))
 
-	// Try direct gunzip command first (works on most systems)
-	_, err := c.executor.Execute(ctx, "gunzip", "-k", "-f", sourceGZPath)
-	if err == nil {
-		// Check if file exists at expected location
-		if _, err := c.executor.Execute(ctx, "test", "-f", strings.TrimSuffix(sourceGZPath, ".gz")); err == nil {
-			// If decompression created file in source directory, move it to target
-			if outputPath != strings.TrimSuffix(sourceGZPath, ".gz") {
-				_, err := c.executor.Execute(ctx, "mv", strings.TrimSuffix(sourceGZPath, ".gz"), outputPath)
-				if err != nil {
-					return "", fmt.Errorf("failed to move decompressed file: %w", err)
-				}
-			}
-			return outputPath, nil
-		}
-	}
+	// Generate a temporary file path
+	tempFile := filepath.Join(outputDir, fmt.Sprintf("%s.tmp.%d", filepath.Base(outputPath), time.Now().UnixNano()))
 
-	// Fallback to shell redirection if direct command failed
-	shCmd := fmt.Sprintf("gunzip -c %s > %s", sourceGZPath, outputPath)
-	output, err := c.executor.Execute(ctx, "sh", "-c", shCmd)
+	// Use gunzip with -c and redirect to the temporary file
+	cmd := fmt.Sprintf("gunzip -c %s > %s", sourceGZPath, tempFile)
+	output, err := c.executor.Execute(ctx, "sh", "-c", cmd)
 	if err != nil {
 		return "", fmt.Errorf("gunzip decompression failed: %w, output: %s", err, string(output))
 	}
 
-	// Verify the file was created successfully
-	if _, err := c.executor.Execute(ctx, "test", "-f", outputPath); err != nil {
-		return "", fmt.Errorf("decompressed file not found at %s", outputPath)
+	// Verify the temp file was created successfully
+	if _, err := c.executor.Execute(ctx, "test", "-f", tempFile); err != nil {
+		return "", fmt.Errorf("decompressed temp file not found at %s", tempFile)
+	}
+
+	// Move the temp file to final destination
+	if _, err := c.executor.Execute(ctx, "mv", tempFile, outputPath); err != nil {
+		// Try to clean up the temp file
+		_, _ = c.executor.Execute(ctx, "rm", "-f", tempFile)
+		return "", fmt.Errorf("failed to move temp file to destination: %w", err)
 	}
 
 	return outputPath, nil
@@ -235,32 +160,26 @@ func (c *CompressionOperations) CompressGZ(ctx context.Context, sourcePath, outp
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Try direct gzip command first (works on most systems)
-	_, err := c.executor.Execute(ctx, "gzip", "-9", "-k", "-c", sourcePath)
-	if err == nil {
-		// If gzip command succeeded but file is in wrong location, handle that case
-		if _, err := c.executor.Execute(ctx, "test", "-f", sourcePath+".gz"); err == nil {
-			// Move from source+.gz to target path if different
-			if sourcePath+".gz" != outputGZPath {
-				_, err := c.executor.Execute(ctx, "mv", sourcePath+".gz", outputGZPath)
-				if err != nil {
-					return fmt.Errorf("failed to move compressed file: %w", err)
-				}
-			}
-			return nil
-		}
-	}
+	// Generate a temporary file path
+	tempFile := filepath.Join(outputDir, fmt.Sprintf("%s.tmp.%d", filepath.Base(outputGZPath), time.Now().UnixNano()))
 
-	// Fallback to shell redirection if direct command didn't work
-	shCmd := fmt.Sprintf("gzip -9 -c %s > %s", sourcePath, outputGZPath)
-	output, err := c.executor.Execute(ctx, "sh", "-c", shCmd)
+	// Use gzip with -9 for maximum compression, -c to write to stdout
+	cmd := fmt.Sprintf("gzip -9c %s > %s", sourcePath, tempFile)
+	output, err := c.executor.Execute(ctx, "sh", "-c", cmd)
 	if err != nil {
 		return fmt.Errorf("gzip compression failed: %w, output: %s", err, string(output))
 	}
 
-	// Verify the file was created successfully
-	if _, err := c.executor.Execute(ctx, "test", "-f", outputGZPath); err != nil {
-		return fmt.Errorf("compressed file not found at %s", outputGZPath)
+	// Verify the temp file was created successfully
+	if _, err := c.executor.Execute(ctx, "test", "-f", tempFile); err != nil {
+		return fmt.Errorf("compressed temp file not found at %s", tempFile)
+	}
+
+	// Move the temp file to final destination
+	if _, err := c.executor.Execute(ctx, "mv", tempFile, outputGZPath); err != nil {
+		// Try to clean up the temp file
+		_, _ = c.executor.Execute(ctx, "rm", "-f", tempFile)
+		return fmt.Errorf("failed to move temp file to destination: %w", err)
 	}
 
 	return nil
@@ -278,11 +197,17 @@ func (c *CompressionOperations) DecompressTarGZ(ctx context.Context, sourceTarGZ
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Use tar to extract
+	// Use tar to extract directly to the output directory
+	// -x: extract
+	// -z: decompress with gzip
+	// -f: specify archive file
+	// -C: change to directory
 	output, err := c.executor.Execute(ctx, "tar", "-xzf", sourceTarGZPath, "-C", outputDir)
 	if err != nil {
 		return fmt.Errorf("tar extraction failed: %w, output: %s", err, string(output))
 	}
+
+	// No need for a temp file here as tar extracts directly to the output directory
 
 	return nil
 }
@@ -300,20 +225,33 @@ func (c *CompressionOperations) CompressTarGZ(ctx context.Context, sourceDir, ou
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
+	// Generate a temporary file path
+	tempFile := filepath.Join(outputDir, fmt.Sprintf("%s.tmp.%d", filepath.Base(outputTarGZPath), time.Now().UnixNano()))
+
 	// Get the parent directory and base name of the source directory
 	parentDir := filepath.Dir(sourceDir)
 	baseName := filepath.Base(sourceDir)
 
-	// Use tar to create archive, but with sh instead of bash for wider compatibility
-	cmd := fmt.Sprintf("cd %s && tar -czf %s %s", parentDir, outputTarGZPath, baseName)
+	// Use tar to create archive directly to the temp file
+	// -c: create archive
+	// -z: compress with gzip
+	// -f: specify archive file
+	cmd := fmt.Sprintf("cd %s && tar -czf %s %s", parentDir, tempFile, baseName)
 	output, err := c.executor.Execute(ctx, "sh", "-c", cmd)
 	if err != nil {
 		return fmt.Errorf("tar compression failed: %w, output: %s", err, string(output))
 	}
 
-	// Verify the file was created successfully
-	if _, err := c.executor.Execute(ctx, "test", "-f", outputTarGZPath); err != nil {
-		return fmt.Errorf("compressed file not found at %s", outputTarGZPath)
+	// Verify the temp file was created successfully
+	if _, err := c.executor.Execute(ctx, "test", "-f", tempFile); err != nil {
+		return fmt.Errorf("compressed temp file not found at %s", tempFile)
+	}
+
+	// Move the temp file to final destination
+	if _, err := c.executor.Execute(ctx, "mv", tempFile, outputTarGZPath); err != nil {
+		// Try to clean up the temp file
+		_, _ = c.executor.Execute(ctx, "rm", "-f", tempFile)
+		return fmt.Errorf("failed to move temp file to destination: %w", err)
 	}
 
 	return nil

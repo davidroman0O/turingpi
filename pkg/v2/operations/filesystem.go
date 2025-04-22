@@ -474,3 +474,26 @@ func (f *FilesystemOperations) ListFilesBasic(ctx context.Context, dir string) (
 
 	return files, nil
 }
+
+// Remove deletes a file or directory at the specified path
+func (f *FilesystemOperations) Remove(ctx context.Context, path string, recursive bool) error {
+	// Check if path exists
+	if _, err := f.executor.Execute(ctx, "test", "-e", path); err != nil {
+		return fmt.Errorf("path does not exist: %s", path)
+	}
+
+	// Determine args based on whether we're removing recursively
+	args := []string{"-f"}
+	if recursive {
+		args = append(args, "-r")
+	}
+	args = append(args, path)
+
+	// Execute rm command
+	output, err := f.executor.Execute(ctx, "rm", args...)
+	if err != nil {
+		return fmt.Errorf("remove operation failed: %w, output: %s", err, string(output))
+	}
+
+	return nil
+}

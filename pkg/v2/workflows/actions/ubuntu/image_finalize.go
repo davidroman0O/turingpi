@@ -115,7 +115,7 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 
 	// 4. Compress image
 	ctx.Logger.Info("Compressing image to: %s", outputPath)
-	if err := imageTool.CompressImageXZ(context.Background(), decompressedImgPath, outputPath); err != nil {
+	if err := imageTool.CompressXZ(context.Background(), decompressedImgPath, outputPath); err != nil {
 		return fmt.Errorf("failed to compress image: %w", err)
 	}
 

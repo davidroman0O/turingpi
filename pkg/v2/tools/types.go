@@ -93,10 +93,10 @@ type OperationsTool interface {
 	MountFilesystem(ctx context.Context, device, mountDir string) error
 	// UnmountFilesystem unmounts a filesystem
 	UnmountFilesystem(ctx context.Context, mountDir string) error
-	// DecompressImageXZ decompresses an XZ-compressed disk image
-	DecompressImageXZ(ctx context.Context, sourceXZ, targetImg string) (string, error)
-	// CompressImageXZ compresses a disk image with XZ
-	CompressImageXZ(ctx context.Context, sourceImg, targetXZ string) error
+	// DecompressXZ decompresses an XZ-compressed disk image
+	DecompressXZ(ctx context.Context, sourceXZ, outputDir string) (string, error)
+	// CompressXZ compresses a disk image with XZ
+	CompressXZ(ctx context.Context, sourceImg, targetXZ string) error
 	// WriteFile writes content to a file in the mounted image
 	WriteFile(ctx context.Context, mountDir, relativePath string, content []byte, perm fs.FileMode) error
 	// CopyFile copies a file to the mounted image
@@ -149,6 +149,8 @@ type OperationsTool interface {
 	ListFiles(ctx context.Context, dir string) ([]operations.FileInfo, error)
 	// ListFilesBasic lists files at a given location and returns just the filenames
 	ListFilesBasic(ctx context.Context, dir string) ([]string, error)
+	// Remove removes a file or directory at the specified path
+	Remove(ctx context.Context, path string, recursive bool) error
 	// Close releases any resources associated with the tool
 	Close() error
 }
@@ -167,4 +169,10 @@ type ToolProvider interface {
 	GetRemoteCache() *cache.SSHCache
 	// GetTmpCache returns local temp cache
 	GetTmpCache() *cache.TempFSCache
+	// GetContainerID returns the container ID if one is assigned to this provider
+	GetContainerID() string
+	// SetContainerID assigns a container ID to this provider
+	SetContainerID(string)
+	// SetOperationsTool updates the operations tool
+	SetOperationsTool(OperationsTool)
 }

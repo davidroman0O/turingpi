@@ -32,6 +32,9 @@ type OperationsToolOptions struct {
 
 	// Container configuration (used if ExecutionMode is container)
 	ContainerConfig container.ContainerConfig
+
+	// Existing container ID to use (instead of creating a new one)
+	ExistingContainerID string
 }
 
 // NewOperationsTool creates a new OperationsTool with default options
@@ -58,6 +61,7 @@ func NewOperationsToolWithOptions(options OperationsToolOptions) (OperationsTool
 		Mode:                   options.ExecutionMode,
 		Registry:               registry,
 		UsePersistentContainer: options.UsePersistentContainer,
+		ExistingContainerID:    options.ExistingContainerID,
 	}
 
 	// Ensure ContainerConfig has a command set
@@ -104,13 +108,13 @@ func (t *OperationsToolImpl) UnmountFilesystem(ctx context.Context, mountDir str
 	return t.filesystemOps.Unmount(ctx, mountDir)
 }
 
-// DecompressImageXZ decompresses an XZ-compressed disk image
-func (t *OperationsToolImpl) DecompressImageXZ(ctx context.Context, sourceXZ, targetDir string) (string, error) {
+// DecompressXZ decompresses an XZ-compressed disk image
+func (t *OperationsToolImpl) DecompressXZ(ctx context.Context, sourceXZ, targetDir string) (string, error) {
 	return t.compressionOps.DecompressXZ(ctx, sourceXZ, targetDir)
 }
 
-// CompressImageXZ compresses a disk image with XZ
-func (t *OperationsToolImpl) CompressImageXZ(ctx context.Context, sourceImg, targetXZ string) error {
+// CompressXZ compresses a disk image with XZ
+func (t *OperationsToolImpl) CompressXZ(ctx context.Context, sourceImg, targetXZ string) error {
 	return t.compressionOps.CompressXZ(ctx, sourceImg, targetXZ)
 }
 
@@ -242,6 +246,11 @@ func (t *OperationsToolImpl) ListFiles(ctx context.Context, dir string) ([]opera
 // ListFilesBasic lists files at a given location and returns just the filenames
 func (t *OperationsToolImpl) ListFilesBasic(ctx context.Context, dir string) ([]string, error) {
 	return t.filesystemOps.ListFilesBasic(ctx, dir)
+}
+
+// Remove removes a file or directory at the specified path
+func (t *OperationsToolImpl) Remove(ctx context.Context, path string, recursive bool) error {
+	return t.filesystemOps.Remove(ctx, path, recursive)
 }
 
 // Close releases any resources associated with the tool

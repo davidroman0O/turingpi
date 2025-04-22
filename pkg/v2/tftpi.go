@@ -12,6 +12,8 @@ import (
 	"github.com/davidroman0O/turingpi/pkg/v2/config"
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
 	"github.com/davidroman0O/turingpi/pkg/v2/keys"
+	"github.com/davidroman0O/turingpi/pkg/v2/operations"
+	"github.com/davidroman0O/turingpi/pkg/v2/platform"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
 )
 
@@ -132,7 +134,36 @@ func New(opts ...Option) (*TuringPiProvider, error) {
 			w.Store.Put("workflow.cache.dir", absLocalCacheDir)
 			w.Store.Put("workflow.tmp.dir", absTmpDir)
 
-			ctn, err := localProvider.GetContainerTool().CreateContainer(ctx, container.ContainerConfig{
+			// Store the provider in the workflow store
+			w.Store.Put(keys.ToolsProvider, localProvider)
+
+			// Skip container creation for Linux systems
+			// We only create containers when we're on non-Linux systems or when Docker is forced
+			if platform.IsLinux() && !provider.configFile.Global.SkipDocker {
+				logger.Info("Running in native mode on Linux")
+
+				// Execute workflow (without removing temp dir)
+				err = next(ctx, w, logger)
+
+				// Note: Temp directory is preserved for processing
+				// Only remove if an environment variable is set
+				if os.Getenv("TURINGPI_CLEANUP_TMP") == "true" {
+					if cleanupErr := os.RemoveAll(tmpDir); cleanupErr != nil {
+						logger.Error("Failed to remove temp directory: %v", cleanupErr)
+					}
+				} else {
+					logger.Info("Preserving temp directory for processing: %s", tmpDir)
+				}
+
+				logger.Info("Completed workflow: %s", w.Name)
+				return err
+			}
+
+			// For non-Linux systems or when Docker is forced, create a container
+			logger.Info("Creating container for workflow execution")
+
+			// Create container config once and reuse it
+			containerConfig := container.ContainerConfig{
 				Image: "alpine:latest", // TODO: make this configurable
 				Name:  localName,
 				Mounts: map[string]string{
@@ -142,8 +173,15 @@ func New(opts ...Option) (*TuringPiProvider, error) {
 				InitCommands: [][]string{ // TODO: make this configurable
 					{"apk", "add", "--no-cache", "xz"},
 				},
-				Command: []string{"sleep", "infinity"},
-			})
+				Command:    []string{"sleep", "infinity"},
+				Privileged: true,
+				Capabilities: []string{
+					"SYS_ADMIN", // Required for mount operations
+					"MKNOD",     // Required for device operations
+				},
+			}
+
+			ctn, err := localProvider.GetContainerTool().CreateContainer(ctx, containerConfig)
 
 			if err != nil {
 				return fmt.Errorf("failed to create container: %w", err)
@@ -152,6 +190,29 @@ func New(opts ...Option) (*TuringPiProvider, error) {
 			if ctx != nil && ctn.ID() != "" {
 				logger.Info("Container created successfully: %s", ctn.ID())
 				w.Store.Put("workflow.container.id", ctn.ID())
+
+				// Store the container ID in the provider for operations
+				localProvider.SetContainerID(ctn.ID())
+
+				// Configure operations tool to use this container
+				// Reuse the container config we already created
+				opsTool, err := tools.NewOperationsToolWithOptions(tools.OperationsToolOptions{
+					ContainerTool:          localProvider.GetContainerTool(),
+					ExecutionMode:          operations.ExecuteContainer,
+					UsePersistentContainer: true,
+					ContainerConfig:        containerConfig,
+					ExistingContainerID:    ctn.ID(),
+				})
+
+				if err != nil {
+					logger.Warn("Failed to create operations tool: %v", err)
+				} else {
+					// Update the provider with the configured operations tool
+					localProvider.SetOperationsTool(opsTool)
+				}
+
+				// Store the provider in the workflow store using the standard key
+				w.Store.Put(keys.ToolsProvider, localProvider)
 			} else {
 				return fmt.Errorf("No container created")
 			}
@@ -164,14 +225,18 @@ func New(opts ...Option) (*TuringPiProvider, error) {
 				} else {
 					logger.Info("Container cleaned up successfully")
 				}
+
+				// Only remove temp dir if explicitly requested
+				// if os.Getenv("TURINGPI_CLEANUP_TMP") == "true" {
+				// if err := os.RemoveAll(tmpDir); err != nil {
+				// 	logger.Error("Failed to remove temp directory: %v", err)
+				// }
+				// } else {
+				// 	logger.Info("Preserving temp directory for processing: %s", tmpDir)
+				// }
 			}()
 
 			err = next(ctx, w, logger)
-
-			// Remove tmp dir
-			if err := os.RemoveAll(tmpDir); err != nil {
-				logger.Error("Failed to remove temp directory: %v", err)
-			}
 
 			logger.Info("Completed workflow: %s", w.Name)
 			return err
@@ -271,21 +336,24 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 		return fmt.Errorf("no cluster specified, must provide a valid cluster name")
 	}
 
-	provider, exists := t.toolProviders[clusterName]
-	if !exists {
+	// Get the cluster config
+	targetClusterConfig := t.getClusterConfig(clusterName)
+	if targetClusterConfig == nil {
 		return fmt.Errorf("cluster '%s' not found", clusterName)
 	}
 
-	// Add verbose logging about the provider and its BMC tool
-	logger.Info("Provider before storing in workflow: %v", provider)
-	logger.Info("BMC tool before storing (should not be nil): %v", provider.GetBMCTool())
+	// Ensure the provider exists for this cluster
+	provider, exists := t.toolProviders[clusterName]
+	if !exists {
+		return fmt.Errorf("provider for cluster '%s' not found", clusterName)
+	}
 
-	// Validate that the provider has a working BMC tool
+	// Add validation for the provider's components
 	if provider.GetBMCTool() == nil {
 		logger.Error("BMC tool is nil in the provider - this indicates an initialization problem")
 
 		// Print provider details
-		logger.Info("Provider details - BMC tool: %v, Image tool: %v, Container tool: %v, LocalCache: %v, RemoteCache: %v",
+		logger.Info("Provider details - BMC tool: %v, Operations tool: %v, Container tool: %v, LocalCache: %v, RemoteCache: %v",
 			provider.GetBMCTool() != nil,
 			provider.GetOperationsTool() != nil,
 			provider.GetContainerTool() != nil,
@@ -300,47 +368,22 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 		return fmt.Errorf("invalid node ID: %d, must be greater than 0", nodeID)
 	}
 
-	// Add the tool provider directly to the workflow store
-	// This ensures it's available immediately for the workflow
-	workflow.Store.Put(keys.ToolsProvider, provider)
-
-	// Verify the provider was correctly stored by retrieving it again
-	storedProvider, err := store.Get[*tools.TuringPiToolProvider](workflow.Store, keys.ToolsProvider)
-	if err != nil {
-		logger.Error("Failed to retrieve stored provider: %v", err)
-	} else {
-		logger.Info("Provider after storing and retrieving: %v", storedProvider)
-		logger.Info("BMC tool after storing (should not be nil): %v", storedProvider.GetBMCTool())
-
-		// Double-check BMC tool is not nil
-		if storedProvider.GetBMCTool() == nil {
-			logger.Error("BMC tool is nil after storing! Store may be performing a shallow copy")
-		}
-	}
-
-	// Set the current node as the target node for all actions
-	workflow.Store.Put(keys.CurrentNodeID, nodeID)
-
-	// Find the cluster and its index
+	// Find the cluster index
 	var clusterIndex int
-	var targetClusterConfig *config.ClusterConfig
-
 	for i, cluster := range t.configFile.Clusters {
 		if cluster.Name == clusterName {
 			clusterIndex = i + 1 // 1-based indexing
-			targetClusterConfig = &cluster
 			break
 		}
 	}
 
-	if targetClusterConfig == nil {
-		return fmt.Errorf("failed to find configuration for cluster '%s'", clusterName)
-	}
+	// Store the active cluster for easy access by the middleware
+	workflow.Store.Put("turingpi.targetCluster", clusterName)
+	workflow.Store.Put("turingpi.clusterIndex", clusterIndex)
+	workflow.Store.Put(keys.CurrentNodeID, nodeID)
 
-	// Add the target cluster's configuration directly to the workflow store
+	// Add cluster details to the store
 	clusterPrefix := fmt.Sprintf("turingpi.cluster.%d", clusterIndex)
-
-	// Store cluster details
 	workflow.Store.Put(fmt.Sprintf("%s.name", clusterPrefix), targetClusterConfig.Name)
 
 	// Store BMC details
@@ -348,10 +391,6 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 	workflow.Store.Put(fmt.Sprintf("%s.ip", bmcPrefix), targetClusterConfig.BMC.IP)
 	workflow.Store.Put(fmt.Sprintf("%s.user", bmcPrefix), targetClusterConfig.BMC.Username)
 	workflow.Store.Put(fmt.Sprintf("%s.password", bmcPrefix), targetClusterConfig.BMC.Password)
-
-	// Store the active cluster and tool provider for easy access
-	workflow.Store.Put("turingpi.targetCluster", clusterName)
-	workflow.Store.Put("turingpi.clusterIndex", clusterIndex)
 
 	// Add specific node information if available in the config
 	var foundNode bool
@@ -370,8 +409,6 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 		}
 	}
 
-	workflow.Store.Put("turingpi.cache.local.dir", provider.GetLocalCache().Location())
-
 	// Add warning if node not found in config but still continue
 	if !foundNode {
 		logger.Warn("Node %d not found in cluster '%s' configuration, continuing with limited information",
@@ -381,8 +418,18 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 	logger.Info("Injected configuration values for cluster '%s', node %d",
 		clusterName, nodeID)
 
-	// Execute workflow
+	// Execute workflow with the middleware handling provider creation
 	return t.Runner.Execute(ctx, workflow, logger)
+}
+
+// Helper function to get cluster config by name
+func (t *TuringPiProvider) getClusterConfig(clusterName string) *config.ClusterConfig {
+	for _, cluster := range t.configFile.Clusters {
+		if cluster.Name == clusterName {
+			return &cluster
+		}
+	}
+	return nil
 }
 
 // GetToolProvider returns the tool provider for a specific cluster

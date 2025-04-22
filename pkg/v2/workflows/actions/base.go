@@ -9,7 +9,6 @@ import (
 	"github.com/davidroman0O/gostage/store"
 	"github.com/davidroman0O/turingpi/pkg/v2/cache"
 	"github.com/davidroman0O/turingpi/pkg/v2/keys"
-	"github.com/davidroman0O/turingpi/pkg/v2/platform"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
 )
 
@@ -78,20 +77,18 @@ func (a *TuringPiAction) Execute(ctx *gostage.ActionContext) error {
 		return errors.New("action does not implement PlatformAction")
 	}
 
-	// Check platform type to determine execution path
-	// TODO: make sure it is also not forced docker execution
-	if platform.IsLinux() {
-		// Direct execution on Linux
-		ctx.Logger.Debug("Using native execution path (Linux)")
-		return platformAction.ExecuteNative(ctx, provider)
-	} else if platform.DockerAvailable() {
-		// Docker-based execution on non-Linux if Docker is available
-		ctx.Logger.Debug("Using Docker execution path")
+	// Check if we have a container ID in the workflow store
+	containerID, err := store.Get[string](ctx.Store(), "workflow.container.id")
+
+	// If we have a container ID, use Docker execution
+	if err == nil && containerID != "" {
+		ctx.Logger.Debug("Using Docker execution path with container: %s", containerID)
 		return platformAction.ExecuteDocker(ctx, provider)
 	}
 
-	// If we get here, we can't execute the action
-	return errors.New("unsupported platform: requires Linux or Docker")
+	// Otherwise use native execution
+	ctx.Logger.Debug("Using native execution path")
+	return platformAction.ExecuteNative(ctx, provider)
 }
 
 // ExecuteNative is the default implementation for Linux platforms

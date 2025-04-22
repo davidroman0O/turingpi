@@ -41,6 +41,9 @@ func (a *ImagePrepareAction) ExecuteNative(ctx *gostage.ActionContext, tools too
 // ExecuteDocker implements execution via Docker
 func (a *ImagePrepareAction) ExecuteDocker(ctx *gostage.ActionContext, tools tools.ToolProvider) error {
 	// return a.executeImpl(ctx, tools)
+
+	/////// TODO: with all the changes i didnt we might have just one implementation on this action
+
 	// Get required parameters from the store
 	nodeID, err := store.GetOrDefault[int](ctx.Store(), keys.CurrentNodeID, 1)
 	if err != nil {
@@ -78,6 +81,8 @@ func (a *ImagePrepareAction) ExecuteDocker(ctx *gostage.ActionContext, tools too
 	// get the source image name
 	sourceImageName := filepath.Base(sourceImagePath) // just get the filename
 
+	ctx.Logger.Info("Source image name: %s", sourceImageName)
+
 	// get the target image path
 	targetImagePath := filepath.Join(tempDir, sourceImageName) // now we have a destination path
 
@@ -112,7 +117,7 @@ func (a *ImagePrepareAction) ExecuteDocker(ctx *gostage.ActionContext, tools too
 		// Keep the original path for copying
 		// originalImagePath := targetImagePath
 		// Remove the suffix for the target path
-		// targetImagePath = strings.TrimSuffix(targetImagePath, ".xz")
+		// decompressedImagePath := strings.TrimSuffix(sourceImageName, ".xz")
 
 		// 	source := fmt.Sprintf("/workdir/%s", sourceImageName)
 		// 	targetDir := "/workdir" // Use container path for output dir, not host path
@@ -166,48 +171,16 @@ func (a *ImagePrepareAction) ExecuteDocker(ctx *gostage.ActionContext, tools too
 		}
 		ctx.Logger.Info("Files in container: %v", files)
 
-		// if _, err := tools.GetOperationsTool().DecompressImageXZ(ctx.GoContext, targetImagePath, filepath.Dir(targetImagePath)); err != nil {
-		// 	return fmt.Errorf("failed to decompress image: %w", err)
-		// }
-
 		for _, file := range files {
 			ctx.Logger.Info("File: %s", file)
 		}
-		// 	// output, err := ctn.Exec(ctx.GoContext, []string{"ls", "-la", "/workdir"})
-		// 	// if err != nil {
-		// 	// 	ctx.Logger.Error("Failed to list files in container: %v", err)
-		// 	// } else {
-		// 	// 	ctx.Logger.Info("Container ls output: %s", output)
-		// 	// }
 
-		// 	// // Use simplified approach for debugging: decompress directly in the container
-		// 	// ctx.Logger.Info("Decompressing directly in the container...")
-		// 	// output, err = ctn.Exec(ctx.GoContext, []string{"xz", "-d", "-k", source})
-		// 	// if err != nil {
-		// 	// 	ctx.Logger.Error("Direct decompression failed: %v", err)
-		// 	// } else {
-		// 	// 	ctx.Logger.Info("Direct decompression output: %s", output)
-		// 	// }
+		ctx.Logger.Info("Decompressing image... from %s -> to %s", fmt.Sprintf("/tmp/%s", sourceImageName), "/tmp/")
 
-		// 	// // Check if decompression worked
-		// 	// decompressedPath := strings.TrimSuffix(source, ".xz")
-		// 	// output, err = ctn.Exec(ctx.GoContext, []string{"ls", "-la", decompressedPath})
-		// 	// if err != nil {
-		// 	// 	ctx.Logger.Error("Decompressed file check failed: %v", err)
-		// 	// } else {
-		// 	// 	ctx.Logger.Info("Decompressed file exists: %s", output)
-		// 	// 	// Copy the decompressed file to the host
-		// 	// 	hostPath := filepath.Join(absoluteTempDir, targetImg)
-		// 	// 	ctx.Logger.Info("Copying decompressed file to host: %s -> %s", decompressedPath, hostPath)
-		// 	// 	if err = ctn.CopyFrom(ctx.GoContext, decompressedPath, hostPath); err != nil {
-		// 	// 		return fmt.Errorf("failed to copy decompressed file from container: %w", err)
-		// 	// 	}
+		if _, err := tools.GetOperationsTool().DecompressXZ(ctx.GoContext, fmt.Sprintf("/tmp/%s", sourceImageName), "/tmp"); err != nil {
+			return fmt.Errorf("failed to decompress image: %w", err)
+		}
 
-		// 	// 	// Store the path to the prepared image
-		// 	// 	if err := ctx.Store().Put("PreparedImagePath", hostPath); err != nil {
-		// 	// 		return fmt.Errorf("failed to store prepared image path: %w", err)
-		// 	// 	}
-		// 	// }
 	}
 
 	return nil

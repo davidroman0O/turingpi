@@ -113,6 +113,7 @@ type TuringPiToolProvider struct {
 	localCache     *cache.FSCache
 	remoteCache    *cache.SSHCache
 	tmpCache       *cache.TempFSCache
+	containerID    string // ID of the container assigned to this provider
 	mu             sync.RWMutex
 }
 
@@ -326,6 +327,27 @@ func (p *TuringPiToolProvider) GetTmpCache() *cache.TempFSCache {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.tmpCache
+}
+
+// GetContainerID returns the container ID if one is assigned to this provider
+func (p *TuringPiToolProvider) GetContainerID() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.containerID
+}
+
+// SetContainerID assigns a container ID to this provider
+func (p *TuringPiToolProvider) SetContainerID(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.containerID = id
+}
+
+// SetOperationsTool updates the operations tool
+func (p *TuringPiToolProvider) SetOperationsTool(tool OperationsTool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.operationsTool = tool
 }
 
 // RemoteCacheConfig holds configuration for remote cache

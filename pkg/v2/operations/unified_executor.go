@@ -48,6 +48,9 @@ type UnifiedExecutor struct {
 	// Track if we've initialized
 	initialized bool
 	initLock    sync.Mutex
+
+	// Existing container ID
+	existingContainerID string
 }
 
 // UnifiedExecutorOptions configures the unified executor
@@ -63,6 +66,9 @@ type UnifiedExecutorOptions struct {
 
 	// UsePersistentContainer indicates whether to use a persistent container
 	UsePersistentContainer bool
+
+	// ExistingContainerID allows using an existing container by ID
+	ExistingContainerID string
 }
 
 // NewUnifiedExecutor creates a new UnifiedExecutor with the specified options
@@ -80,6 +86,7 @@ func NewUnifiedExecutor(options UnifiedExecutorOptions) *UnifiedExecutor {
 		registry:               options.Registry,
 		containerConfig:        options.ContainerConfig,
 		usePersistentContainer: options.UsePersistentContainer,
+		existingContainerID:    options.ExistingContainerID,
 	}
 }
 
@@ -105,6 +112,21 @@ func (e *UnifiedExecutor) initialize(ctx context.Context) error {
 	// If we're using container mode, we need a registry
 	if effectiveMode == ExecuteContainer && e.registry == nil {
 		return fmt.Errorf("container registry is required for container execution mode")
+	}
+
+	// If we have an existing container ID, use it
+	if effectiveMode == ExecuteContainer && e.existingContainerID != "" {
+		container, err := e.registry.Get(ctx, e.existingContainerID)
+		if err != nil {
+			return fmt.Errorf("failed to get existing container %s: %w", e.existingContainerID, err)
+		}
+
+		e.containerLock.Lock()
+		e.container = container
+		e.containerLock.Unlock()
+
+		e.initialized = true
+		return nil
 	}
 
 	// If we're using a persistent container, create it now
