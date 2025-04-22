@@ -72,8 +72,8 @@ func CreateUbuntuRK1Deployment(nodeID int, options UbuntuRK1DeploymentOptions) *
 	// Add Ubuntu image preparation stage
 	workflow.AddStage(ubuntuStages.CreateImagePreparationStage())
 
-	// // Add Ubuntu image deployment stage
-	// workflow.AddStage(ubuntuStages.CreateImageDeploymentStage())
+	// Add Ubuntu image deployment stage
+	workflow.AddStage(ubuntuStages.CreateImageDeploymentStage())
 
 	// // Add Ubuntu post-installation stage for password configuration
 	// workflow.AddStage(ubuntuStages.CreatePostInstallationStage())

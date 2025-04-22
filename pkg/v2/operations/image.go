@@ -48,14 +48,16 @@ func (i *ImageOperations) CopyToDevice(ctx context.Context, imagePath, device st
 // ResizePartition resizes the last partition of an image to fill available space
 func (i *ImageOperations) ResizePartition(ctx context.Context, device string) error {
 	// Get device info
-	output, err := i.executor.Execute(ctx, "fdisk", "-l", device)
+	output, err := ExecuteCommand(i.executor, ctx, "fdisk", "-l", device)
 	if err != nil {
-		return fmt.Errorf("failed to get device info: %s: %w", string(output), err)
+		return NewOperationError("getting device info", device, err)
 	}
 
 	// Find last partition number
 	lines := strings.Split(string(output), "\n")
 	var lastPartNum string
+	var foundPartition bool
+
 	for _, line := range lines {
 		if strings.Contains(line, device) && !strings.Contains(line, "Disk") {
 			// Line contains a partition entry
@@ -64,22 +66,32 @@ func (i *ImageOperations) ResizePartition(ctx context.Context, device string) er
 				// Extract partition number from device name (e.g., /dev/sda1 -> 1)
 				partName := fields[0]
 				lastPartNum = partName[len(partName)-1:]
+				foundPartition = true
 			}
 		}
 	}
 
-	if lastPartNum == "" {
-		return fmt.Errorf("no partitions found on device %s", device)
+	if !foundPartition || lastPartNum == "" {
+		// Include the fdisk output in the error to help diagnose the issue
+		return fmt.Errorf("no partitions found on device %s\nfdisk output:\n%s",
+			device, string(output))
 	}
 
 	// Use growpart to expand the partition to fill available space
-	output, err = i.executor.Execute(ctx, "growpart", device, lastPartNum)
+	output, err = ExecuteCommand(i.executor, ctx, "growpart", device, lastPartNum)
 	if err != nil {
 		// If the error is because the partition is already at maximum size, this is not a failure
 		if strings.Contains(string(output), "NOCHANGE") {
 			return nil
 		}
-		return fmt.Errorf("failed to resize partition: %s: %w", string(output), err)
+
+		// Try to check if growpart is installed
+		_, checkErr := ExecuteCommand(i.executor, ctx, "which", "growpart")
+		if checkErr != nil {
+			return fmt.Errorf("growpart command not found. Please install growpart (usually part of cloud-utils package): %v", checkErr)
+		}
+
+		return NewOperationError(fmt.Sprintf("resizing partition %s on device", lastPartNum), device, err)
 	}
 
 	// Get the last partition device
@@ -91,7 +103,15 @@ func (i *ImageOperations) ResizePartition(ctx context.Context, device string) er
 	}
 
 	// Resize the filesystem on the partition
-	return i.fs.ResizeFilesystem(ctx, lastPart)
+	resizeErr := i.fs.ResizeFilesystem(ctx, lastPart)
+	if resizeErr != nil {
+		// Get more info about the filesystem before reporting the error
+		fsTypeOutput, _ := ExecuteCommand(i.executor, ctx, "blkid", lastPart)
+		return fmt.Errorf("partition resized but filesystem resize failed: %w\nFilesystem info: %s",
+			resizeErr, string(fsTypeOutput))
+	}
+
+	return nil
 }
 
 // ValidateImage validates that an image file exists and is a valid disk image

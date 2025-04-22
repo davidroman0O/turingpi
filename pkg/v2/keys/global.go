@@ -26,6 +26,7 @@ const (
 	ClusterHealth = "turingpi.cluster.health" // Overall cluster health
 
 	// Container-related keys (parameterized with container ID)
+	// TODO: i'm not sure about that
 	ContainerState = "turingpi.container.%s.state" // Container state
 	ContainerList  = "turingpi.containers.list"    // List of all containers
 
@@ -43,6 +44,8 @@ const (
 	ToolsProvider = "turingpi.tools"       // Main tool provider
 	CacheTool     = "turingpi.tools.cache" // Cache tool for content caching
 	FSTool        = "turingpi.tools.fs"    // Filesystem operations tool
+
+	//
 )
 
 // FormatKey formats a key with its parameters

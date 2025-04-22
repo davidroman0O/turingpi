@@ -2,14 +2,12 @@
 package ubuntu
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/gostage/store"
-	"github.com/davidroman0O/turingpi/pkg/v2/cache"
 	"github.com/davidroman0O/turingpi/pkg/v2/keys"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
 	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions"
@@ -25,7 +23,7 @@ func NewImageFinalizeAction() *ImageFinalizeAction {
 	return &ImageFinalizeAction{
 		PlatformActionBase: actions.NewPlatformActionBase(
 			"ubuntu-image-finalize",
-			"Finalizes the Ubuntu image preparation by cleaning up, compressing, and caching",
+			"Finalizes the Ubuntu image preparation by configuring network, mounting, and customizing the image",
 		),
 	}
 }
@@ -48,129 +46,149 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 		return fmt.Errorf("failed to get node ID: %w", err)
 	}
 
-	// Check if we previously found a cached image
-	cachedImagePath, err := store.Get[string](ctx.Store(), "CachedImagePath")
-	if err == nil && cachedImagePath != "" {
-		ctx.Logger.Info("Using previously found cached image: %s", cachedImagePath)
+	// Get the decompressed image file path
+	ubuntuImageDecompressedFile, err := store.Get[string](ctx.Store(), "ubuntu.image.decompressed.file")
+	if err != nil {
+		return fmt.Errorf("failed to get ubuntu image decompressed path: %w", err)
+	}
 
-		// Store final image path for deployment
-		if err := ctx.Store().Put("FinalImagePath", cachedImagePath); err != nil {
-			return fmt.Errorf("failed to store final image path: %w", err)
+	ctx.Logger.Info("Finalizing Ubuntu image for node %d", nodeID)
+	ctx.Logger.Info("Decompressed image file: %s", ubuntuImageDecompressedFile)
+
+	// Map the partitions
+	ctx.Logger.Info("Mapping partitions...")
+	rootDevPath, err := toolsProvider.GetOperationsTool().MapPartitions(ctx.GoContext, ubuntuImageDecompressedFile)
+	if err != nil {
+		return fmt.Errorf("failed to map partitions: %w", err)
+	}
+
+	// Setup deferred cleanup of mapped partitions
+	defer func() {
+		ctx.Logger.Info("Cleaning up mapped partitions...")
+		if err := toolsProvider.GetOperationsTool().UnmapPartitions(ctx.GoContext, ubuntuImageDecompressedFile); err != nil {
+			ctx.Logger.Warn("Error unmapping partitions: %v", err)
+		}
+	}()
+
+	// Create mount point
+	mountPoint := "/mnt/ubuntu" // Standard mount point for Ubuntu
+	ctx.Logger.Info("Using mount point: %s", mountPoint)
+
+	// Mount the filesystem
+	ctx.Logger.Info("Mounting root partition %s to %s...", rootDevPath, mountPoint)
+	if err := toolsProvider.GetOperationsTool().Mount(ctx.GoContext, rootDevPath, mountPoint, "", []string{"rw"}); err != nil {
+		return fmt.Errorf("failed to mount image: %w", err)
+	}
+
+	// Setup deferred unmount
+	defer func() {
+		ctx.Logger.Info("Unmounting filesystem...")
+		if err := toolsProvider.GetOperationsTool().Unmount(ctx.GoContext, mountPoint); err != nil {
+			ctx.Logger.Warn("Error unmounting filesystem: %v", err)
+		}
+	}()
+
+	// Apply network configuration if provided
+	hostname, err := store.GetOrDefault[string](ctx.Store(), "Hostname", "")
+	hasHostname := err == nil && hostname != ""
+
+	ipCIDR, err := store.GetOrDefault[string](ctx.Store(), "IPCIDR", "")
+	hasIPCIDR := err == nil && ipCIDR != ""
+
+	gateway, err := store.GetOrDefault[string](ctx.Store(), "Gateway", "")
+	hasGateway := err == nil && gateway != ""
+
+	dnsServersStr, err := store.GetOrDefault[string](ctx.Store(), "DNSServers", "")
+	hasDNS := err == nil && dnsServersStr != ""
+
+	// Apply network configuration if all required components are available
+	if hasHostname && hasIPCIDR && hasGateway && hasDNS {
+		ctx.Logger.Info("Applying network configuration...")
+
+		// Parse DNS servers from string representation
+		dnsServers := parseDNSServers(dnsServersStr)
+
+		// Default hostname if not provided or empty
+		if hostname == "" {
+			hostname = fmt.Sprintf("node%d", nodeID)
+			ctx.Logger.Info("Using default hostname: %s", hostname)
 		}
 
-		return nil
+		// Apply the network configuration
+		if err := toolsProvider.GetOperationsTool().ApplyNetworkConfig(
+			ctx.GoContext,
+			mountPoint,
+			hostname,
+			ipCIDR,
+			gateway,
+			dnsServers,
+		); err != nil {
+			return fmt.Errorf("failed to apply network configuration: %w", err)
+		}
+
+		ctx.Logger.Info("Network configuration applied successfully")
+	} else {
+		ctx.Logger.Info("Skipping network configuration as not all parameters are provided")
+		if !hasHostname {
+			ctx.Logger.Info("Missing hostname parameter")
+		}
+		if !hasIPCIDR {
+			ctx.Logger.Info("Missing IP CIDR parameter")
+		}
+		if !hasGateway {
+			ctx.Logger.Info("Missing gateway parameter")
+		}
+		if !hasDNS {
+			ctx.Logger.Info("Missing DNS servers parameter")
+		}
 	}
 
-	// Check if we modified the image
-	imageModified, err := store.GetOrDefault[bool](ctx.Store(), "ImageModified", false)
-	if err != nil {
-		return fmt.Errorf("failed to check if image was modified: %w", err)
+	ctx.Logger.Info("Image customization completed successfully")
+
+	// Unmount the filesystem before compression
+	ctx.Logger.Info("Unmounting filesystem before compression...")
+	if err := toolsProvider.GetOperationsTool().Unmount(ctx.GoContext, mountPoint); err != nil {
+		return fmt.Errorf("failed to unmount filesystem: %w", err)
 	}
 
-	if !imageModified {
-		ctx.Logger.Info("No image modifications were performed, nothing to finalize")
-		return nil
+	// Unmap partitions before compression
+	ctx.Logger.Info("Unmapping partitions before compression...")
+	if err := toolsProvider.GetOperationsTool().UnmapPartitions(ctx.GoContext, ubuntuImageDecompressedFile); err != nil {
+		return fmt.Errorf("failed to unmap partitions: %w", err)
 	}
 
-	// Get required info from previous actions
-	decompressedImgPath, err := store.Get[string](ctx.Store(), "DecompressedImagePath")
-	if err != nil {
-		return fmt.Errorf("failed to get decompressed image path: %w", err)
-	}
+	// Generate the compressed output file path
+	outputDir := filepath.Dir(ubuntuImageDecompressedFile)
+	compressedImagePath := filepath.Join(outputDir, filepath.Base(ubuntuImageDecompressedFile)+".xz")
 
-	mountDir, err := store.Get[string](ctx.Store(), "MountDir")
-	if err != nil {
-		return fmt.Errorf("failed to get mount directory: %w", err)
-	}
-
-	// Get image operations tool
-	imageTool, err := a.GetOperationsTool()
-	if err != nil {
-		return fmt.Errorf("failed to get image operations tool: %w", err)
-	}
-
-	// 1. Unmount filesystem
-	ctx.Logger.Info("Unmounting filesystem at: %s", mountDir)
-	if err := imageTool.UnmountFilesystem(context.Background(), mountDir); err != nil {
-		ctx.Logger.Warn("Error unmounting filesystem: %v", err)
-		// Continue anyway to try to clean up other resources
-	}
-
-	// 2. Unmap partitions
-	ctx.Logger.Info("Unmapping partitions for: %s", decompressedImgPath)
-	if err := imageTool.UnmapPartitions(context.Background(), decompressedImgPath); err != nil {
-		ctx.Logger.Warn("Error unmapping partitions: %v", err)
-		// Continue anyway to try to salvage what we can
-	}
-
-	// 3. Prepare output filename
-	hostname, err := store.GetOrDefault[string](ctx.Store(), "Hostname", fmt.Sprintf("node%d", nodeID))
-	if err != nil {
-		return fmt.Errorf("failed to get hostname: %w", err)
-	}
-
-	outputFilename := fmt.Sprintf("%s-rk1-ubuntu.img.xz", hostname)
-	tempDir := filepath.Dir(decompressedImgPath)
-	outputPath := filepath.Join(tempDir, outputFilename)
-
-	// 4. Compress image
-	ctx.Logger.Info("Compressing image to: %s", outputPath)
-	if err := imageTool.CompressXZ(context.Background(), decompressedImgPath, outputPath); err != nil {
+	// Compress the image
+	ctx.Logger.Info("Compressing finalized image to %s...", compressedImagePath)
+	if err := toolsProvider.GetOperationsTool().CompressXZ(ctx.GoContext, ubuntuImageDecompressedFile, compressedImagePath); err != nil {
 		return fmt.Errorf("failed to compress image: %w", err)
 	}
 
-	// 5. Cache the result
-	ctx.Logger.Info("Caching compressed image")
-	localCache := toolsProvider.GetLocalCache()
-	if localCache != nil {
-		// Get the cache key (should have been stored in previous action)
-		cacheKey, err := store.Get[string](ctx.Store(), "ImageCacheKey")
-		if err != nil {
-			ctx.Logger.Warn("Could not get cache key: %v", err)
-		} else {
-			// Create metadata for cache
-			inputHash, _ := store.GetOrDefault[string](ctx.Store(), "InputHash", "")
-
-			metadata := cache.Metadata{
-				Key:         cacheKey,
-				Filename:    outputPath,
-				ContentType: "application/octet-stream",
-				Tags: map[string]string{
-					"nodeID":   fmt.Sprint(nodeID),
-					"hostname": hostname,
-					"board":    "rk1",
-					"os":       "ubuntu",
-				},
-				OSType:    "ubuntu",
-				OSVersion: "latest",
-				Hash:      inputHash,
-			}
-
-			// Open file for reading
-			file, err := os.Open(outputPath)
-			if err != nil {
-				ctx.Logger.Warn("Failed to open image file for caching: %v", err)
-			} else {
-				defer file.Close()
-
-				// Store in cache
-				_, err = localCache.Put(context.Background(), cacheKey, metadata, file)
-				if err != nil {
-					ctx.Logger.Warn("Failed to cache image: %v", err)
-				} else {
-					ctx.Logger.Info("Image cached successfully with key: %s", cacheKey)
-				}
-			}
-		}
-	} else {
-		ctx.Logger.Info("Local cache not available, skipping cache step")
+	// Store the compressed image path in the context for later use
+	if err := ctx.Store().Put("ubuntu.image.compressed.file", compressedImagePath); err != nil {
+		ctx.Logger.Warn("Failed to store compressed image path in context: %v", err)
+		// This is a context storage issue, not an image issue, so we can continue
+		return fmt.Errorf("failed to store compressed image path in context: %w", err)
 	}
 
-	// Store final image path for deployment
-	if err := ctx.Store().Put("FinalImagePath", outputPath); err != nil {
-		return fmt.Errorf("failed to store final image path: %w", err)
-	}
-
-	ctx.Logger.Info("Image preparation finalized successfully")
+	ctx.Logger.Info("Image finalization and compression completed successfully")
 	return nil
+}
+
+// parseDNSServers parses a string representation of DNS servers into a string slice
+func parseDNSServers(dnsStr string) []string {
+	// Remove brackets, spaces and split by commas
+	dnsStr = strings.ReplaceAll(dnsStr, "[", "")
+	dnsStr = strings.ReplaceAll(dnsStr, "]", "")
+	dnsStr = strings.ReplaceAll(dnsStr, " ", "")
+
+	// If empty, return empty slice
+	if dnsStr == "" {
+		return []string{}
+	}
+
+	return strings.Split(dnsStr, ",")
 }

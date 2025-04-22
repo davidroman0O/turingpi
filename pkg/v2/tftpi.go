@@ -164,14 +164,17 @@ func New(opts ...Option) (*TuringPiProvider, error) {
 
 			// Create container config once and reuse it
 			containerConfig := container.ContainerConfig{
-				Image: "alpine:latest", // TODO: make this configurable
+				Image: "ubuntu:latest", // TODO: make this configurable
 				Name:  localName,
 				Mounts: map[string]string{
 					absLocalCacheDir: "/cache",
 					absTmpDir:        "/tmp",
 				},
 				InitCommands: [][]string{ // TODO: make this configurable
-					{"apk", "add", "--no-cache", "xz"},
+					// {"apk", "add", "--no-cache", "xz"},
+					// {"apk", "add", "--no-cache", "kpartx"},
+					{"apt-get", "update"},
+					{"apt-get", "install", "-y", "xz-utils", "kpartx"},
 				},
 				Command:    []string{"sleep", "infinity"},
 				Privileged: true,

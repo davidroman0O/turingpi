@@ -17,7 +17,7 @@ func CreateImagePreparationStage() *gostage.Stage {
 
 	// Add actions in sequence
 	stage.AddAction(ubuntuActions.NewImagePrepareAction())
-	// stage.AddAction(ubuntuActions.NewImageFinalizeAction())
+	stage.AddAction(ubuntuActions.NewImageFinalizeAction())
 	// stage.AddAction(ubuntuActions.NewImageUploadAction())
 
 	return stage

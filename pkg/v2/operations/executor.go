@@ -25,6 +25,37 @@ type CommandExecutor interface {
 	ExecuteInPath(ctx context.Context, dir string, name string, args ...string) ([]byte, error)
 }
 
+// ExecuteCommand is a helper that executes a command and returns a formatted error if it fails
+func ExecuteCommand(executor CommandExecutor, ctx context.Context, name string, args ...string) ([]byte, error) {
+	output, err := executor.Execute(ctx, name, args...)
+	if err != nil {
+		// Create a detailed error with command information
+		return output, NewCommandError(name, args, string(output), err)
+	}
+	return output, nil
+}
+
+// ExecuteCommandWithInput is a helper that executes a command with input and returns a formatted error if it fails
+func ExecuteCommandWithInput(executor CommandExecutor, ctx context.Context, input string, name string, args ...string) ([]byte, error) {
+	output, err := executor.ExecuteWithInput(ctx, input, name, args...)
+	if err != nil {
+		// Create a detailed error with command information
+		return output, NewCommandError(name, args, string(output), err)
+	}
+	return output, nil
+}
+
+// ExecuteCommandInPath is a helper that executes a command in a specific directory and returns a formatted error if it fails
+func ExecuteCommandInPath(executor CommandExecutor, ctx context.Context, dir string, name string, args ...string) ([]byte, error) {
+	output, err := executor.ExecuteInPath(ctx, dir, name, args...)
+	if err != nil {
+		// Create a detailed error with command information
+		cmdErr := NewCommandError(name, args, string(output), err)
+		return output, fmt.Errorf("in directory %s: %w", dir, cmdErr)
+	}
+	return output, nil
+}
+
 // NativeExecutor implements CommandExecutor by directly executing commands on the host OS
 type NativeExecutor struct{}
 

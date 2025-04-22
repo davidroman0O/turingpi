@@ -134,7 +134,7 @@ func TestImageOperations_ResizePartition(t *testing.T) {
 
 		// Assert
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get device info")
+		assert.Contains(t, err.Error(), "getting device info failed")
 	})
 
 	t.Run("no partitions found", func(t *testing.T) {
@@ -176,6 +176,12 @@ func TestImageOperations_ResizePartition(t *testing.T) {
 			Err    error
 		}{Output: []byte(""), Err: fmt.Errorf("NOCHANGE: partition 2 is already at the disk end")}
 
+		// Add mock for 'which growpart' call
+		mockExec.MockResponses["which growpart"] = struct {
+			Output []byte
+			Err    error
+		}{Output: []byte("/usr/bin/growpart"), Err: nil}
+
 		imgOps := NewImageOperations(mockExec)
 
 		// Execute
@@ -183,7 +189,7 @@ func TestImageOperations_ResizePartition(t *testing.T) {
 
 		// Assert
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to resize partition")
+		assert.Contains(t, err.Error(), "resizing partition 2 on device failed")
 	})
 
 	t.Run("growpart NOCHANGE success", func(t *testing.T) {

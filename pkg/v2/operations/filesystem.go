@@ -55,43 +55,214 @@ func (f *FilesystemOperations) GetFilesystemType(ctx context.Context, partition 
 
 // MapPartitions maps partitions in a disk image using kpartx
 func (f *FilesystemOperations) MapPartitions(ctx context.Context, imgPathAbs string) (string, error) {
-	output, err := f.executor.Execute(ctx, "kpartx", "-av", imgPathAbs)
+	// Ensure the image file exists
+	if _, err := ExecuteCommand(f.executor, ctx, "test", "-f", imgPathAbs); err != nil {
+		return "", NewOperationError("image validation", imgPathAbs, err)
+	}
+
+	// Execute kpartx to map partitions
+	output, err := ExecuteCommand(f.executor, ctx, "kpartx", "-av", imgPathAbs)
 	if err != nil {
-		return "", fmt.Errorf("failed to map partitions: %w, output: %s", err, string(output))
+		// Check if kpartx is installed
+		_, checkErr := ExecuteCommand(f.executor, ctx, "which", "kpartx")
+		if checkErr != nil {
+			return "", fmt.Errorf("kpartx command not found. Please install kpartx: %v", checkErr)
+		}
+
+		// If kpartx is installed but failed, provide more context
+		return "", NewOperationError("partition mapping", imgPathAbs, err)
 	}
 
 	// Parse kpartx output to get the root partition device
-	lines := strings.Split(string(output), "\n")
-	if len(lines) < 2 {
-		return "", fmt.Errorf("unexpected kpartx output format (less than 2 lines)")
+	rootDevice, err := f.parseKpartxOutput(string(output))
+	if err != nil {
+		return "", NewOperationError("parsing kpartx output", string(output), err)
 	}
 
-	// Check second line for root partition (assuming first is boot, second is root)
-	rootLine := lines[1]
+	rootDevPath := fmt.Sprintf("/dev/mapper/%s", rootDevice)
+
+	// Wait for the device to become available
+	if err := f.waitForDevice(ctx, rootDevPath, 10); err != nil {
+		// Try to get more info about the device
+		deviceListOutput, _ := ExecuteCommand(f.executor, ctx, "ls", "-la", "/dev/mapper")
+		return "", fmt.Errorf("device not available after mapping: %w (ls -la /dev/mapper: %s)",
+			err, string(deviceListOutput))
+	}
+
+	return rootDevPath, nil
+}
+
+// parseKpartxOutput parses kpartx output to extract root partition device path
+func (f *FilesystemOperations) parseKpartxOutput(output string) (string, error) {
+	// Example output:
+	// add map loop1p1 (253:1): 0 524288 linear 7:1 8192
+	// add map loop1p2 (253:2): 0 32768000 linear 7:1 532480
+	//
+	// For simplicity, we assume the first line is boot and second is root
+	// This could be improved to detect partitions by examining sizes or file systems
+
+	lines := strings.Split(output, "\n")
+
+	// Filter out empty lines and log what we found
+	var validLines []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" && strings.HasPrefix(line, "add") {
+			validLines = append(validLines, line)
+		}
+	}
+
+	if len(validLines) == 0 {
+		return "", fmt.Errorf("no valid partition maps found in kpartx output")
+	}
+
+	// For single partition images, use the first line
+	// For multi-partition images, assume second partition is root (common practice)
+	var rootLine string
+	if len(validLines) == 1 {
+		rootLine = validLines[0]
+	} else {
+		rootLine = validLines[1] // Second partition is typically root
+	}
+
 	parts := strings.Fields(rootLine)
 	if len(parts) < 3 || !strings.HasPrefix(parts[0], "add") {
 		return "", fmt.Errorf("unexpected kpartx output format: %s", rootLine)
 	}
 
-	return fmt.Sprintf("/dev/mapper/%s", parts[2]), nil
+	// Extract the device name (3rd field)
+	return parts[2], nil
+}
+
+// waitForDevice waits for a device to become available, with a specified timeout in seconds
+func (f *FilesystemOperations) waitForDevice(ctx context.Context, devicePath string, timeoutSeconds int) error {
+	// Try for the specified number of seconds
+	for i := 0; i < timeoutSeconds; i++ {
+		// Check if device exists
+		_, err := f.executor.Execute(ctx, "test", "-e", devicePath)
+		if err == nil {
+			// Device exists, make an additional check for block device
+			_, err = f.executor.Execute(ctx, "test", "-b", devicePath)
+			if err == nil {
+				return nil // Device is available and is a block device
+			}
+		}
+
+		// Wait 1 second before trying again
+		time.Sleep(1 * time.Second)
+	}
+
+	return fmt.Errorf("timeout waiting for device to become available: %s", devicePath)
 }
 
 // UnmapPartitions unmaps partitions that were mapped with kpartx
 func (f *FilesystemOperations) UnmapPartitions(ctx context.Context, imgPathAbs string) error {
-	output, err := f.executor.Execute(ctx, "kpartx", "-d", imgPathAbs)
-	if err != nil {
-		return fmt.Errorf("failed to unmap partitions: %w, output: %s", err, string(output))
+	// Ensure the image file exists
+	if _, err := ExecuteCommand(f.executor, ctx, "test", "-f", imgPathAbs); err != nil {
+		return NewOperationError("image validation", imgPathAbs, err)
 	}
+
+	// Execute kpartx with -d flag to unmap partitions
+	fmt.Printf("Unmapping partitions for image: %s\n", imgPathAbs)
+
+	// First, get a list of mapped devices for this image to verify cleanup
+	// We use losetup to find which loop device is associated with our image
+	losetupOutput, err := ExecuteCommand(f.executor, ctx, "losetup", "-j", imgPathAbs)
+	if err == nil && len(losetupOutput) > 0 {
+		// Parse out the loop device name from output like "/dev/loop0: []: (/path/to/image)"
+		loopLines := strings.Split(string(losetupOutput), "\n")
+		for _, line := range loopLines {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+
+			loopParts := strings.Split(line, ":")
+			if len(loopParts) > 0 {
+				loopDev := strings.TrimSpace(loopParts[0])
+				fmt.Printf("Found mapped loop device: %s\n", loopDev)
+			}
+		}
+	}
+
+	// Now run kpartx -d
+	output, err := ExecuteCommand(f.executor, ctx, "kpartx", "-d", imgPathAbs)
+	if err != nil {
+		// Check if kpartx is installed
+		_, checkErr := ExecuteCommand(f.executor, ctx, "which", "kpartx")
+		if checkErr != nil {
+			return fmt.Errorf("kpartx command not found. Please install kpartx: %v", checkErr)
+		}
+
+		return NewOperationError("partition unmapping", imgPathAbs, err)
+	}
+
+	// If there was output, log it - it might contain important info
+	if len(output) > 0 {
+		fmt.Printf("Unmap output: %s\n", string(output))
+	}
+
+	// Verify that the image is no longer mapped to any loop devices
+	verifyOutput, err := ExecuteCommand(f.executor, ctx, "losetup", "-j", imgPathAbs)
+	if err == nil && len(verifyOutput) > 0 && strings.TrimSpace(string(verifyOutput)) != "" {
+		// Still mapped, try a more aggressive approach
+		fmt.Printf("Image still has loop mappings, attempting forceful cleanup\n")
+
+		// Try the -dv (delete with verbose) option for more forceful unmapping
+		forceOutput, forceErr := ExecuteCommand(f.executor, ctx, "kpartx", "-dv", imgPathAbs)
+		if forceErr != nil {
+			fmt.Printf("Warning: forceful unmap attempt failed: %v\nOutput: %s\n",
+				forceErr, string(forceOutput))
+		}
+
+		// If still mapped, try to find and detach the loop device directly
+		finalVerifyOutput, _ := ExecuteCommand(f.executor, ctx, "losetup", "-j", imgPathAbs)
+		if len(finalVerifyOutput) > 0 && strings.TrimSpace(string(finalVerifyOutput)) != "" {
+			fmt.Printf("Warning: Image still has loop mappings after forceful cleanup: %s\n",
+				string(finalVerifyOutput))
+		}
+	}
+
+	fmt.Printf("Partition unmapping completed for: %s\n", imgPathAbs)
 	return nil
 }
 
 // Mount mounts a filesystem to a specified directory
 func (f *FilesystemOperations) Mount(ctx context.Context, device, mountPoint, fsType string, options []string) error {
 	// Create mount point directory
-	if _, err := f.executor.Execute(ctx, "mkdir", "-p", mountPoint); err != nil {
-		return fmt.Errorf("failed to create mount point directory: %w", err)
+	if _, err := ExecuteCommand(f.executor, ctx, "mkdir", "-p", mountPoint); err != nil {
+		return NewOperationError("creating mount point", mountPoint, err)
 	}
 
+	// Check if the device exists
+	if _, err := ExecuteCommand(f.executor, ctx, "test", "-e", device); err != nil {
+		// Try to get more information about the device
+		lsOutput, _ := ExecuteCommand(f.executor, ctx, "ls", "-la", filepath.Dir(device))
+		return fmt.Errorf("device does not exist: %s\nDirectory contents: %s",
+			device, string(lsOutput))
+	}
+
+	// Log what we're attempting to do
+	fmt.Printf("Mounting %s to %s", device, mountPoint)
+	if fsType != "" {
+		fmt.Printf(" with filesystem type %s", fsType)
+	}
+	if len(options) > 0 {
+		fmt.Printf(" and options %s", strings.Join(options, ","))
+	}
+	fmt.Println()
+
+	// Check if already mounted
+	isMounted, existingMountPoint, err := f.IsPartitionMounted(ctx, device)
+	if err == nil && isMounted {
+		// If already mounted to our desired location, we're done
+		if existingMountPoint == mountPoint {
+			fmt.Printf("Device %s is already mounted at %s\n", device, mountPoint)
+			return nil
+		}
+		// Mounted somewhere else - this might be an issue
+		fmt.Printf("Warning: device %s is already mounted at %s\n", device, existingMountPoint)
+	}
+
+	// Build mount command arguments
 	args := []string{device, mountPoint}
 	if fsType != "" {
 		args = append(args, "-t", fsType)
@@ -100,22 +271,83 @@ func (f *FilesystemOperations) Mount(ctx context.Context, device, mountPoint, fs
 		args = append(args, "-o", strings.Join(options, ","))
 	}
 
-	output, err := f.executor.Execute(ctx, "mount", args...)
+	// Execute mount command
+	_, err = ExecuteCommand(f.executor, ctx, "mount", args...)
 	if err != nil {
-		return fmt.Errorf("mount failed: %s: %w", string(output), err)
+		// Get filesystem details to help diagnose the issue
+		fsTypeOutput, _ := ExecuteCommand(f.executor, ctx, "blkid", device)
+
+		errDetails := fmt.Sprintf("mount failed for device: %s\n", device)
+		errDetails += fmt.Sprintf("Filesystem details: %s\n", string(fsTypeOutput))
+
+		// Try dmesg for more kernel-level errors
+		dmesgOutput, _ := ExecuteCommand(f.executor, ctx, "dmesg", "|", "tail", "-n", "10")
+		if len(dmesgOutput) > 0 {
+			errDetails += fmt.Sprintf("Recent kernel messages:\n%s\n", string(dmesgOutput))
+		}
+
+		return NewOperationError("mount", errDetails, err)
 	}
 
+	// Verify mount was successful
+	_, verifyErr := ExecuteCommand(f.executor, ctx, "mountpoint", "-q", mountPoint)
+	if verifyErr != nil {
+		// Mount command succeeded but verification failed
+		// This is strange, so include extra diagnostic information
+		mountsOutput, _ := ExecuteCommand(f.executor, ctx, "cat", "/proc/mounts")
+		return fmt.Errorf("mount command succeeded but verification failed: %w\nCurrent mounts: %s",
+			verifyErr, string(mountsOutput))
+	}
+
+	// Report success
+	fmt.Printf("Successfully mounted %s at %s\n", device, mountPoint)
 	return nil
 }
 
 // Unmount unmounts a filesystem
 func (f *FilesystemOperations) Unmount(ctx context.Context, mountPoint string) error {
-	output, err := f.executor.Execute(ctx, "umount", mountPoint)
+	// Check if mountPoint is actually mounted
+	mounted, err := f.isMountPoint(ctx, mountPoint)
 	if err != nil {
-		return fmt.Errorf("unmount failed: %s: %w", string(output), err)
+		fmt.Printf("Warning: couldn't verify if %s is mounted: %v\n", mountPoint, err)
+		// Continue anyway, let the unmount command handle it
+	} else if !mounted {
+		fmt.Printf("Mount point %s is not mounted, nothing to unmount\n", mountPoint)
+		return nil // Already unmounted, no error
 	}
 
+	fmt.Printf("Unmounting filesystem at %s\n", mountPoint)
+
+	// Try a normal unmount first
+	output, err := f.executor.Execute(ctx, "umount", mountPoint)
+	if err != nil {
+		// If the regular unmount fails, try with -l (lazy) option
+		fmt.Printf("Regular unmount failed, attempting lazy unmount: %v\n", err)
+		lazyOutput, lazyErr := f.executor.Execute(ctx, "umount", "-l", mountPoint)
+		if lazyErr != nil {
+			return fmt.Errorf("unmount failed (both regular and lazy): %w, output: %s",
+				err, string(output)+"\n"+string(lazyOutput))
+		}
+		fmt.Printf("Lazy unmount of %s succeeded\n", mountPoint)
+		return nil
+	}
+
+	fmt.Printf("Successfully unmounted %s\n", mountPoint)
 	return nil
+}
+
+// isMountPoint checks if a path is a mount point
+func (f *FilesystemOperations) isMountPoint(ctx context.Context, path string) (bool, error) {
+	output, err := f.executor.Execute(ctx, "mountpoint", "-q", path)
+	if err != nil {
+		// Exit code 1 means it's not a mount point
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		// Otherwise there was some other error
+		return false, fmt.Errorf("error checking mountpoint: %w, output: %s", err, string(output))
+	}
+	return true, nil // Successfully ran, so it is a mount point
 }
 
 // Format formats a partition with a specified filesystem
