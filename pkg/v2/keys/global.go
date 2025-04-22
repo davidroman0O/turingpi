@@ -39,7 +39,10 @@ const (
 	TargetNodes   = "turingpi.workflow.target_nodes" // List of nodes to operate on
 	WorkflowState = "turingpi.workflow.state"        // Overall workflow state
 
-	ToolsProvider = "turingpi.tools"
+	// Tool access keys
+	ToolsProvider = "turingpi.tools"       // Main tool provider
+	CacheTool     = "turingpi.tools.cache" // Cache tool for content caching
+	FSTool        = "turingpi.tools.fs"    // Filesystem operations tool
 )
 
 // FormatKey formats a key with its parameters

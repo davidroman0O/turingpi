@@ -5,8 +5,8 @@ import (
 	"fmt"
 
 	"github.com/davidroman0O/gostage"
-	"github.com/davidroman0O/turingpi/pkg/v2/actions/common"
-	"github.com/davidroman0O/turingpi/pkg/v2/stages/node"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions/common"
+	node "github.com/davidroman0O/turingpi/pkg/v2/workflows/stages"
 )
 
 // CreateNodeResetWorkflow creates a workflow for resetting a node

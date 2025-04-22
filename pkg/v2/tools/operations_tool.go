@@ -129,3 +129,61 @@ func (t *OperationsToolImpl) DecompressGZ(ctx context.Context, sourceGZ, outputD
 func (t *OperationsToolImpl) CompressGZ(ctx context.Context, sourcePath, outputGZ string) error {
 	return t.compressionOps.CompressGZ(ctx, sourcePath, outputGZ)
 }
+
+// IsPartitionMounted checks if a partition is mounted
+func (t *OperationsToolImpl) IsPartitionMounted(ctx context.Context, partition string) (bool, string, error) {
+	return t.filesystemOps.IsPartitionMounted(ctx, partition)
+}
+
+// GetFilesystemType gets the filesystem type of a partition
+func (t *OperationsToolImpl) GetFilesystemType(ctx context.Context, partition string) (string, error) {
+	return t.filesystemOps.GetFilesystemType(ctx, partition)
+}
+
+// Mount mounts a filesystem to a specified directory with options
+func (t *OperationsToolImpl) Mount(ctx context.Context, device, mountPoint, fsType string, options []string) error {
+	return t.filesystemOps.Mount(ctx, device, mountPoint, fsType, options)
+}
+
+// Unmount unmounts a filesystem
+func (t *OperationsToolImpl) Unmount(ctx context.Context, mountPoint string) error {
+	return t.filesystemOps.Unmount(ctx, mountPoint)
+}
+
+// Format formats a partition with a specified filesystem
+func (t *OperationsToolImpl) Format(ctx context.Context, device, fsType, label string) error {
+	return t.filesystemOps.Format(ctx, device, fsType, label)
+}
+
+// ResizeFilesystem resizes a filesystem to fill its partition
+func (t *OperationsToolImpl) ResizeFilesystem(ctx context.Context, device string) error {
+	return t.filesystemOps.ResizeFilesystem(ctx, device)
+}
+
+// CopyDirectory recursively copies a directory to another location
+func (t *OperationsToolImpl) CopyDirectory(ctx context.Context, src, dst string) error {
+	return t.filesystemOps.CopyDirectory(ctx, src, dst)
+}
+
+// FileExists checks if a file exists
+func (t *OperationsToolImpl) FileExists(ctx context.Context, path, relativePath string) (bool, error) {
+	// Just delegate to the filesystem operations
+	// FilesystemOperations.FileExists doesn't return an error, it returns a bool
+	exists := t.filesystemOps.FileExists(path, relativePath)
+	return exists, nil
+}
+
+// IsDirectory checks if a path is a directory
+func (t *OperationsToolImpl) IsDirectory(ctx context.Context, path, relativePath string) (bool, error) {
+	return t.filesystemOps.IsDirectory(path, relativePath), nil
+}
+
+// MakeDirectory creates a directory with specified permissions
+func (t *OperationsToolImpl) MakeDirectory(ctx context.Context, mountDir, path string, perm fs.FileMode) error {
+	return t.filesystemOps.MakeDirectory(mountDir, path, perm)
+}
+
+// ChangePermissions changes the permissions of a file or directory
+func (t *OperationsToolImpl) ChangePermissions(ctx context.Context, mountDir, path string, perm fs.FileMode) error {
+	return t.filesystemOps.ChangePermissions(mountDir, path, perm)
+}

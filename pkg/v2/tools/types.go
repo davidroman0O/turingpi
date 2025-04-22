@@ -122,6 +122,28 @@ type OperationsTool interface {
 	DecompressGZ(ctx context.Context, sourceGZ, outputDir string) (string, error)
 	// CompressGZ compresses a file using GZ compression
 	CompressGZ(ctx context.Context, sourcePath, outputGZ string) error
+	// IsPartitionMounted checks if a partition is mounted
+	IsPartitionMounted(ctx context.Context, partition string) (bool, string, error)
+	// GetFilesystemType gets the filesystem type of a partition
+	GetFilesystemType(ctx context.Context, partition string) (string, error)
+	// Mount mounts a filesystem to a specified directory with options
+	Mount(ctx context.Context, device, mountPoint, fsType string, options []string) error
+	// Unmount unmounts a filesystem
+	Unmount(ctx context.Context, mountPoint string) error
+	// Format formats a partition with a specified filesystem
+	Format(ctx context.Context, device, fsType, label string) error
+	// ResizeFilesystem resizes a filesystem to fill its partition
+	ResizeFilesystem(ctx context.Context, device string) error
+	// CopyDirectory recursively copies a directory to another location
+	CopyDirectory(ctx context.Context, src, dst string) error
+	// FileExists checks if a file exists
+	FileExists(ctx context.Context, path, relativePath string) (bool, error)
+	// IsDirectory checks if a path is a directory
+	IsDirectory(ctx context.Context, path, relativePath string) (bool, error)
+	// MakeDirectory creates a directory with specified permissions
+	MakeDirectory(ctx context.Context, mountDir, path string, perm fs.FileMode) error
+	// ChangePermissions changes the permissions of a file or directory
+	ChangePermissions(ctx context.Context, mountDir, path string, perm fs.FileMode) error
 }
 
 // ToolProvider provides access to all the tools

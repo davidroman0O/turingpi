@@ -3,8 +3,8 @@ package node
 
 import (
 	"github.com/davidroman0O/gostage"
-	"github.com/davidroman0O/turingpi/pkg/v2/actions/bmc"
-	"github.com/davidroman0O/turingpi/pkg/v2/actions/common"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions/bmc"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions/common"
 )
 
 // CreateResetStage creates a stage for resetting a node
