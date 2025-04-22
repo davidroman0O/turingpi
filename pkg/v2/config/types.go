@@ -39,6 +39,7 @@ type SSHConfig struct {
 type CacheConfig struct {
 	LocalDir  string `yaml:"localDir" json:"localDir"`
 	RemoteDir string `yaml:"remoteDir,omitempty" json:"remoteDir,omitempty"`
+	TempDir   string `yaml:"tempDir,omitempty" json:"tempDir,omitempty"`
 }
 
 // ConfigFile represents the top-level configuration file structure

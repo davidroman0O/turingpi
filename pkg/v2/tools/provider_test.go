@@ -265,3 +265,85 @@ func TestTuringPiToolProvider_InitializationErrors(t *testing.T) {
 		}
 	})
 }
+
+// mockExecutor implements the bmc.CommandExecutor interface for testing
+type mockExecutor struct{}
+
+func (m *mockExecutor) ExecuteCommand(command string) (string, string, error) {
+	return "mock stdout", "mock stderr", nil
+}
+
+func TestTuringPiToolProviderTempCache(t *testing.T) {
+	// Create a temp directory for the test
+	tempDir, err := os.MkdirTemp("", "turingpi-provider-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a provider with a specified temp cache dir
+	config := &tools.TuringPiToolConfig{
+		BMCExecutor:  &mockExecutor{},
+		CacheDir:     tempDir,
+		TempCacheDir: tempDir, // Use the same temp dir for regular and temp cache
+	}
+
+	// Create the provider with relaxed requirements
+	provider, err := tools.NewTuringPiToolProviderForTesting(config, true)
+	if err != nil {
+		t.Fatalf("Failed to create test provider: %v", err)
+	}
+	defer provider.Close()
+
+	// Test that the temp cache was initialized
+	tmpCache := provider.GetTmpCache()
+	if tmpCache == nil {
+		t.Fatal("Temporary cache not initialized")
+	}
+
+	// Verify the temp cache directory exists
+	if _, err := os.Stat(tmpCache.CleanupPath()); os.IsNotExist(err) {
+		t.Errorf("Temporary cache directory not created: %v", err)
+	}
+
+	// Test with auto-generated temp directory
+	configWithAutoTemp := &tools.TuringPiToolConfig{
+		BMCExecutor: &mockExecutor{},
+		CacheDir:    tempDir,
+		// No TempCacheDir specified - should auto-create
+	}
+
+	// Create another provider with auto temp dir
+	providerWithAutoTemp, err := tools.NewTuringPiToolProviderForTesting(configWithAutoTemp, true)
+	if err != nil {
+		t.Fatalf("Failed to create test provider with auto temp dir: %v", err)
+	}
+	defer providerWithAutoTemp.Close()
+
+	// Test that the temp cache was initialized with auto dir
+	tmpCacheAuto := providerWithAutoTemp.GetTmpCache()
+	if tmpCacheAuto == nil {
+		t.Fatal("Auto-generated temporary cache not initialized")
+	}
+
+	// Verify the auto temp cache directory exists
+	if _, err := os.Stat(tmpCacheAuto.CleanupPath()); os.IsNotExist(err) {
+		t.Errorf("Auto-generated temporary cache directory not created: %v", err)
+	}
+
+	// Verify it's in the system temp directory
+	systemTempDir := os.TempDir()
+	if tmpCacheAuto.CleanupPath() == "" || tmpCacheAuto.CleanupPath() == systemTempDir {
+		t.Errorf("Auto temp cache path is invalid: %s", tmpCacheAuto.CleanupPath())
+	}
+
+	// Close the provider and verify temp cache cleanup
+	if err := provider.Close(); err != nil {
+		t.Fatalf("Failed to close provider: %v", err)
+	}
+
+	// Verify the temp directory has been removed
+	if _, err := os.Stat(tmpCache.CleanupPath()); !os.IsNotExist(err) {
+		t.Errorf("Temporary cache directory not removed after Close()")
+	}
+}

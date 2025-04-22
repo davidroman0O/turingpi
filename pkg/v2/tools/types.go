@@ -158,4 +158,6 @@ type ToolProvider interface {
 	GetLocalCache() *cache.FSCache
 	// GetRemoteCache returns the remote SSH cache
 	GetRemoteCache() *cache.SSHCache
+	// GetTmpCache returns local temp cache
+	GetTmpCache() *cache.TempFSCache
 }

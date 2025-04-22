@@ -10,19 +10,14 @@ import (
 	"github.com/davidroman0O/gostage"
 	tftpi "github.com/davidroman0O/turingpi/pkg/v2"
 	"github.com/davidroman0O/turingpi/pkg/v2/config"
-	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions/bmc"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/ubuntu"
 )
 
 func main() {
 	// Enable debug logging
 	os.Setenv("GOSTAGE_DEBUG", "true")
 
-	// Create temporary cache directory in the user's home directory
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("failed to get user home directory: %v", err)
-	}
-	cacheDir := filepath.Join(homeDir, ".turingpi", "cache")
+	cacheDir := filepath.Join(".turingpi", "cache")
 
 	// Ensure cache directory exists
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
@@ -41,7 +36,9 @@ func main() {
 			Cache: &config.CacheConfig{
 				LocalDir:  cacheDir,
 				RemoteDir: "/var/cache/turingpi",
+				TempDir:   ".turingpi/tmp",
 			},
+
 			// No nodes configuration needed!
 		},
 	))
@@ -50,20 +47,18 @@ func main() {
 		log.Fatalf("failed to create turingpi provider: %v", err)
 	}
 
-	wrk := gostage.NewWorkflow("whatever", "whatever", "whatever")
+	wrk := ubuntu.CreateUbuntuRK1Deployment(1, ubuntu.UbuntuRK1DeploymentOptions{
+		SourceImagePath: "/Users/davidroman/Documents/iso/turingpi/ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img.xz",
+		NetworkConfig: &ubuntu.NetworkConfig{
+			Hostname:   "rk1-node-1",
+			IPCIDR:     "192.168.1.101/24",
+			Gateway:    "192.168.1.1",
+			DNSServers: []string{"8.8.8.8", "8.8.4.4"},
+		},
+		NewPassword: "turing1234",
+	})
 
-	stage := gostage.NewStage("power-on", "power-on", "power-on")
-
-	wrk.AddStage(stage)
-
-	stage.AddAction(bmc.NewGetPowerStatusAction())
-	stage.AddAction(bmc.NewPowerOnNodeAction())
-
-	// Get a default logger - debug level should be controlled by the env var
-	logger := NewDefaultLogger()
-
-	// Execute on cluster1, targeting node 1
-	if err := tf.Execute(context.Background(), wrk, logger, "cluster1", 1); err != nil {
+	if err := tf.Execute(context.Background(), wrk, NewDefaultLogger(), "cluster1", 1); err != nil {
 		log.Fatalf("failed to execute workflow: %v", err)
 	}
 

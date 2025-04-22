@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/gostage"
-	"github.com/davidroman0O/turingpi/pkg/v2/actions"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions"
 )
 
 // WaitAction is a generic action to wait for a specified time

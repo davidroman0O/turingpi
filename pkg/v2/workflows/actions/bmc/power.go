@@ -7,10 +7,10 @@ import (
 
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/gostage/store"
-	"github.com/davidroman0O/turingpi/pkg/v2/actions"
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/keys"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions"
 )
 
 // PowerOnNodeAction turns on a node

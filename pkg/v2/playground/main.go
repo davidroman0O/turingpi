@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/davidroman0O/turingpi/pkg/v2/actions/ubuntu"
 	"github.com/davidroman0O/turingpi/pkg/v2/cache"
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
 	"github.com/davidroman0O/turingpi/pkg/v2/platform"
 	"github.com/davidroman0O/turingpi/pkg/v2/state"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions/ubuntu"
 )
 
 // CommandExecutorMock implements the bmc.CommandExecutor interface for testing

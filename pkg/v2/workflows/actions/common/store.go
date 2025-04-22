@@ -4,8 +4,8 @@ package common
 import (
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/gostage/store"
-	"github.com/davidroman0O/turingpi/pkg/v2/actions"
 	"github.com/davidroman0O/turingpi/pkg/v2/keys"
+	"github.com/davidroman0O/turingpi/pkg/v2/workflows/actions"
 )
 
 // SetCurrentNodeAction sets the current node ID in the workflow

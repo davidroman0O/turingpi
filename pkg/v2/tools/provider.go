@@ -110,6 +110,7 @@ type TuringPiToolProvider struct {
 	containerTool ContainerTool
 	localCache    *cache.FSCache
 	remoteCache   *cache.SSHCache
+	tmpCache      *cache.TempFSCache
 	mu            sync.RWMutex
 }
 
@@ -132,6 +133,23 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 			return nil, fmt.Errorf("failed to initialize local cache: %w", err)
 		}
 		provider.localCache = fsCache
+	}
+
+	// Initialize temporary cache with auto-cleanup
+	if config.TempCacheDir != "" {
+		// If a specific temp directory is provided, use it
+		tmpCache, err := cache.NewTempFSCache(config.TempCacheDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize temporary cache: %w", err)
+		}
+		provider.tmpCache = tmpCache
+	} else {
+		// Otherwise create a system temp directory
+		tmpCache, err := cache.CreateTempCache("")
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize temporary cache: %w", err)
+		}
+		provider.tmpCache = tmpCache
 	}
 
 	// Initialize container tool if Docker is available
@@ -233,6 +251,13 @@ func (p *TuringPiToolProvider) GetRemoteCache() *cache.SSHCache {
 	return p.remoteCache
 }
 
+// GetTmpCache returns the temporary filesystem cache
+func (p *TuringPiToolProvider) GetTmpCache() *cache.TempFSCache {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.tmpCache
+}
+
 // RemoteCacheConfig holds configuration for remote cache
 type RemoteCacheConfig struct {
 	// Host is the hostname or IP address of the node
@@ -259,6 +284,178 @@ type TuringPiToolConfig struct {
 	// CacheDir is the directory for caching
 	CacheDir string
 
+	// TempCacheDir is the directory for temporary caching
+	// If specified, temporary cache will be created in this directory
+	// If not specified, a system temporary directory will be used
+	TempCacheDir string
+
 	// RemoteCache holds configuration for the remote cache
 	RemoteCache *RemoteCacheConfig
+}
+
+// Close cleans up all resources used by the provider
+func (p *TuringPiToolProvider) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var errors []error
+
+	// Close the container tool
+	if p.containerTool != nil {
+		if containerToolCloser, ok := p.containerTool.(interface{ Close() error }); ok {
+			if err := containerToolCloser.Close(); err != nil {
+				errors = append(errors, fmt.Errorf("error closing container tool: %w", err))
+			}
+		}
+	}
+
+	// Close the caches - order matters here
+	// First close the temporary cache, since it depends on the underlying FSCache
+	if p.tmpCache != nil {
+		if err := p.tmpCache.Close(); err != nil {
+			errors = append(errors, fmt.Errorf("error closing temporary cache: %w", err))
+		}
+		// Clear reference to prevent double close
+		p.tmpCache = nil
+	}
+
+	// Then close the local cache
+	if p.localCache != nil {
+		if err := p.localCache.Close(); err != nil {
+			errors = append(errors, fmt.Errorf("error closing local cache: %w", err))
+		}
+		// Clear reference to prevent double close
+		p.localCache = nil
+	}
+
+	// Finally close the remote cache
+	if p.remoteCache != nil {
+		if err := p.remoteCache.Close(); err != nil {
+			errors = append(errors, fmt.Errorf("error closing remote cache: %w", err))
+		}
+		// Clear reference to prevent double close
+		p.remoteCache = nil
+	}
+
+	// If there were errors, combine them and return
+	if len(errors) > 0 {
+		errorMsg := "multiple errors closing resources:"
+		for _, err := range errors {
+			errorMsg += "\n" + err.Error()
+		}
+		return fmt.Errorf(errorMsg)
+	}
+
+	return nil
+}
+
+// NewTuringPiToolProviderForTesting creates a provider with relaxed requirements for testing
+// This function should only be used in test code, never in production
+func NewTuringPiToolProviderForTesting(config *TuringPiToolConfig, skipChecks bool) (*TuringPiToolProvider, error) {
+	provider := &TuringPiToolProvider{}
+
+	// Initialize tools
+	if config.BMCExecutor != nil {
+		bmcInstance := bmc.New(config.BMCExecutor)
+		provider.bmcTool = NewBMCToolAdapter(bmcInstance)
+	} else if !skipChecks {
+		return nil, fmt.Errorf("BMCExecutor is required")
+	}
+
+	if config.CacheDir != "" {
+		// Initialize the local cache directly
+		fsCache, err := cache.NewFSCache(config.CacheDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize local cache: %w", err)
+		}
+		provider.localCache = fsCache
+	} else if !skipChecks {
+		return nil, fmt.Errorf("local cache is not initialized")
+	}
+
+	// Initialize temporary cache with auto-cleanup
+	if config.TempCacheDir != "" {
+		// If a specific temp directory is provided, use it
+		tmpCache, err := cache.NewTempFSCache(config.TempCacheDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize temporary cache: %w", err)
+		}
+		provider.tmpCache = tmpCache
+	} else {
+		// Otherwise create a system temp directory
+		tmpCache, err := cache.CreateTempCache("")
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize temporary cache: %w", err)
+		}
+		provider.tmpCache = tmpCache
+	}
+
+	// Initialize container tool if Docker is available
+	// Skip if TURINGPI_SKIP_DOCKER is set to true or skipChecks is true
+	skipDocker := os.Getenv("TURINGPI_SKIP_DOCKER") == "true" || skipChecks
+	if !skipDocker && platform.DockerAvailable() {
+		registry, err := container.NewDockerRegistry()
+		if err == nil {
+			provider.containerTool = NewContainerTool(registry)
+		}
+	}
+
+	// Initialize operations-based image tool (skip if Docker is skipped)
+	if !skipDocker && provider.containerTool != nil {
+		opsTool, err := NewOperationsTool(provider.containerTool)
+		if err != nil {
+			// Log the error but continue as this isn't critical
+			fmt.Printf("Warning: Failed to initialize operations tool: %v\n", err)
+		} else {
+			provider.imageTool = opsTool
+		}
+	} else if skipDocker && !skipChecks {
+		fmt.Println("Skipping Docker and operations tools initialization as TURINGPI_SKIP_DOCKER=true")
+	}
+
+	// Initialize remote cache if remote config is provided
+	if config.RemoteCache != nil && config.RemoteCache.Host != "" && !skipChecks {
+		sshConfig := cache.SSHConfig{
+			Host:     config.RemoteCache.Host,
+			Port:     config.RemoteCache.Port,
+			User:     config.RemoteCache.User,
+			Password: config.RemoteCache.Password,
+		}
+
+		sshCache, err := cache.NewSSHCache(sshConfig, config.RemoteCache.RemotePath)
+		if err == nil {
+			provider.remoteCache = sshCache
+		} else {
+			// Just log the error and continue without remote cache
+			fmt.Printf("Failed to create remote cache: %v\n", err)
+		}
+	}
+
+	// Skip all requirement checks if skipChecks is true
+	if skipChecks {
+		return provider, nil
+	}
+
+	// Otherwise perform the normal requirement checks
+	if provider.bmcTool == nil {
+		return nil, fmt.Errorf("BMC tool is not initialized")
+	}
+
+	if provider.imageTool == nil {
+		return nil, fmt.Errorf("image tool is not initialized")
+	}
+
+	if provider.containerTool == nil {
+		return nil, fmt.Errorf("container tool is not initialized")
+	}
+
+	if provider.localCache == nil {
+		return nil, fmt.Errorf("local cache is not initialized")
+	}
+
+	if provider.remoteCache == nil {
+		return nil, fmt.Errorf("remote cache is not initialized")
+	}
+
+	return provider, nil
 }

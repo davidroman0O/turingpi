@@ -134,8 +134,9 @@ func (t *TuringPiProvider) initializeToolProviders() error {
 
 		// Create tool provider config
 		toolConfig := &tools.TuringPiToolConfig{
-			BMCExecutor: bmcExecutor,
-			CacheDir:    cacheDir,
+			BMCExecutor:  bmcExecutor,
+			CacheDir:     cacheDir,
+			TempCacheDir: cluster.Cache.TempDir,
 		}
 
 		// Set up remote cache using BMC connection details
@@ -283,6 +284,8 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 			break
 		}
 	}
+
+	workflow.Store.Put("turingpi.cache.local.dir", provider.GetLocalCache().Location())
 
 	// Add warning if node not found in config but still continue
 	if !foundNode {
