@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/davidroman0O/gostage"
 	tftpi "github.com/davidroman0O/turingpi/pkg/v2"
@@ -16,6 +17,19 @@ func main() {
 	// Enable debug logging
 	os.Setenv("GOSTAGE_DEBUG", "true")
 
+	// Create temporary cache directory in the user's home directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("failed to get user home directory: %v", err)
+	}
+	cacheDir := filepath.Join(homeDir, ".turingpi", "cache")
+
+	// Ensure cache directory exists
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		log.Fatalf("failed to create cache directory: %v", err)
+	}
+
+	// Create with absolutely minimal config - just BMC info and cache dir
 	tf, err := tftpi.New(tftpi.WithClusterConfig(
 		&config.ClusterConfig{
 			Name: "cluster1",
@@ -24,6 +38,11 @@ func main() {
 				Username: "root",
 				Password: "turing",
 			},
+			Cache: &config.CacheConfig{
+				LocalDir:  cacheDir,
+				RemoteDir: "/var/cache/turingpi",
+			},
+			// No nodes configuration needed!
 		},
 	))
 
