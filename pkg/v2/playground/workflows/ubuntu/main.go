@@ -21,7 +21,7 @@ func main() {
 
 	// Ensure cache directory exists
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		log.Fatalf("failed to create cache directory: %v", err)
+		log.Fatalf("start failed to create cache directory: %v", err)
 	}
 
 	// Create with absolutely minimal config - just BMC info and cache dir

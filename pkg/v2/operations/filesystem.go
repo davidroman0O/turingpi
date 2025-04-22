@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -323,4 +324,153 @@ func (f *FilesystemOperations) ChangePermissions(mountDir, path string, perm fs.
 		return fmt.Errorf("failed to change permissions: %w", err)
 	}
 	return nil
+}
+
+// FileInfo represents information about a file or directory
+type FileInfo struct {
+	Name        string      // Base name of the file
+	Size        int64       // Size in bytes
+	IsDir       bool        // Is this a directory
+	Mode        fs.FileMode // File mode and permission bits
+	ModTime     time.Time   // Modification time
+	SymlinkPath string      // Target path if this is a symlink, empty otherwise
+}
+
+// ListFiles lists files at a given location, similar to the ls command
+func (f *FilesystemOperations) ListFiles(ctx context.Context, dir string) ([]FileInfo, error) {
+	// Use a more basic ls format that works in BusyBox
+	// -l: long format
+	// -a: show hidden files
+	output, err := f.executor.Execute(ctx, "ls", "-la", dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	var files []FileInfo
+
+	fmt.Println("Listing files in", dir)
+
+	// Skip the first line, which is the total count
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+
+		// Parse line in the format:
+		// <permissions> <links> <user> <group> <size> <month> <day> <time/year> <filename>
+		// Example: -rw-r--r-- 1 user group 12345 Jan 1 12:34 file.txt
+		fields := strings.Fields(line)
+		if len(fields) < 8 {
+			continue // Skip lines with unexpected format
+		}
+
+		// Extract information
+		permissions := fields[0]
+		size, _ := strconv.ParseInt(fields[4], 10, 64)
+
+		// Filename might contain spaces and is at the end after timestamp
+		// Find the index where filename starts (after timestamp)
+		nameIndex := 7
+		if len(fields) > nameIndex {
+			name := strings.Join(fields[nameIndex:], " ")
+
+			// Check if it's a directory or a symlink
+			isDir := strings.HasPrefix(permissions, "d")
+			isSymlink := strings.HasPrefix(permissions, "l")
+
+			// Simplified modTime parsing - just current time since format varies
+			modTime := time.Now()
+
+			// Parse permissions
+			var mode fs.FileMode
+			if isDir {
+				mode |= fs.ModeDir
+			}
+			if isSymlink {
+				mode |= fs.ModeSymlink
+			}
+
+			// Parse permissions (simplified)
+			if strings.Contains(permissions[1:4], "r") {
+				mode |= 0400
+			}
+			if strings.Contains(permissions[1:4], "w") {
+				mode |= 0200
+			}
+			if strings.Contains(permissions[1:4], "x") {
+				mode |= 0100
+			}
+			if strings.Contains(permissions[4:7], "r") {
+				mode |= 0040
+			}
+			if strings.Contains(permissions[4:7], "w") {
+				mode |= 0020
+			}
+			if strings.Contains(permissions[4:7], "x") {
+				mode |= 0010
+			}
+			if strings.Contains(permissions[7:10], "r") {
+				mode |= 0004
+			}
+			if strings.Contains(permissions[7:10], "w") {
+				mode |= 0002
+			}
+			if strings.Contains(permissions[7:10], "x") {
+				mode |= 0001
+			}
+
+			// Handle symlinks
+			var symlinkPath string
+			if isSymlink && strings.Contains(name, " -> ") {
+				parts := strings.Split(name, " -> ")
+				name = parts[0]
+				symlinkPath = parts[1]
+			}
+
+			// Add file to results
+			files = append(files, FileInfo{
+				Name:        name,
+				Size:        size,
+				IsDir:       isDir,
+				Mode:        mode,
+				ModTime:     modTime,
+				SymlinkPath: symlinkPath,
+			})
+		}
+	}
+
+	return files, nil
+}
+
+// ListFilesBasic lists files at a given location and returns just the filenames
+func (f *FilesystemOperations) ListFilesBasic(ctx context.Context, dir string) ([]string, error) {
+	// Log the actual directory we're listing for debugging purposes
+	fmt.Printf("ListFilesBasic: Listing files in directory: %s\n", dir)
+
+	output, err := f.executor.Execute(ctx, "ls", "-la", dir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+
+	fmt.Println("================")
+	fmt.Println(string(output))
+	fmt.Println("================")
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var files []string
+
+	for _, line := range lines {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+
+	output, err = f.executor.Execute(ctx, "pwd")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	return files, nil
 }

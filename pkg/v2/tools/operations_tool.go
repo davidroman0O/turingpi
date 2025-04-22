@@ -2,8 +2,10 @@ package tools
 
 import (
 	"context"
+	"io"
 	"io/fs"
 
+	"github.com/davidroman0O/turingpi/pkg/v2/container"
 	"github.com/davidroman0O/turingpi/pkg/v2/operations"
 )
 
@@ -17,14 +19,61 @@ type OperationsToolImpl struct {
 	executor       operations.CommandExecutor
 }
 
-// NewOperationsTool creates a new OperationsTool
-func NewOperationsTool(containerTool ContainerTool) (OperationsTool, error) {
-	// Adapt the ContainerTool to container.Registry
-	registryAdapter := NewContainerToolAdapter(containerTool)
+// OperationsToolOptions contains configuration options for the operations tool
+type OperationsToolOptions struct {
+	// ContainerTool is the container tool to use (can be nil if using native execution)
+	ContainerTool ContainerTool
 
-	// Create a container executor that creates temporary containers on demand
-	// instead of a persistent container
-	executor := operations.NewTemporaryContainerExecutor(registryAdapter)
+	// Force execution mode (auto, native, container)
+	ExecutionMode operations.ExecutionMode
+
+	// Whether to use a persistent container for operations
+	UsePersistentContainer bool
+
+	// Container configuration (used if ExecutionMode is container)
+	ContainerConfig container.ContainerConfig
+}
+
+// NewOperationsTool creates a new OperationsTool with default options
+func NewOperationsTool(containerTool ContainerTool) (OperationsTool, error) {
+	options := OperationsToolOptions{
+		ContainerTool:          containerTool,
+		ExecutionMode:          operations.ExecuteAuto,
+		UsePersistentContainer: false,
+	}
+
+	return NewOperationsToolWithOptions(options)
+}
+
+// NewOperationsToolWithOptions creates a new OperationsTool with specified options
+func NewOperationsToolWithOptions(options OperationsToolOptions) (OperationsTool, error) {
+	// Adapt the ContainerTool to container.Registry if provided
+	var registry container.Registry
+	if options.ContainerTool != nil {
+		registry = NewContainerToolAdapter(options.ContainerTool)
+	}
+
+	// Set up the unified executor
+	executorOptions := operations.UnifiedExecutorOptions{
+		Mode:                   options.ExecutionMode,
+		Registry:               registry,
+		UsePersistentContainer: options.UsePersistentContainer,
+	}
+
+	// Ensure ContainerConfig has a command set
+	containerConfig := options.ContainerConfig
+	if len(containerConfig.Command) == 0 {
+		containerConfig.Command = []string{"sleep", "infinity"}
+	}
+
+	// Set default image if not specified
+	if containerConfig.Image == "" {
+		containerConfig.Image = "alpine:latest"
+	}
+
+	executorOptions.ContainerConfig = containerConfig
+
+	executor := operations.NewUnifiedExecutor(executorOptions)
 
 	return &OperationsToolImpl{
 		imageOps:       operations.NewImageOperations(executor),
@@ -167,10 +216,7 @@ func (t *OperationsToolImpl) CopyDirectory(ctx context.Context, src, dst string)
 
 // FileExists checks if a file exists
 func (t *OperationsToolImpl) FileExists(ctx context.Context, path, relativePath string) (bool, error) {
-	// Just delegate to the filesystem operations
-	// FilesystemOperations.FileExists doesn't return an error, it returns a bool
-	exists := t.filesystemOps.FileExists(path, relativePath)
-	return exists, nil
+	return t.filesystemOps.FileExists(path, relativePath), nil
 }
 
 // IsDirectory checks if a path is a directory
@@ -186,4 +232,23 @@ func (t *OperationsToolImpl) MakeDirectory(ctx context.Context, mountDir, path s
 // ChangePermissions changes the permissions of a file or directory
 func (t *OperationsToolImpl) ChangePermissions(ctx context.Context, mountDir, path string, perm fs.FileMode) error {
 	return t.filesystemOps.ChangePermissions(mountDir, path, perm)
+}
+
+// ListFiles lists files at a given location with detailed information
+func (t *OperationsToolImpl) ListFiles(ctx context.Context, dir string) ([]operations.FileInfo, error) {
+	return t.filesystemOps.ListFiles(ctx, dir)
+}
+
+// ListFilesBasic lists files at a given location and returns just the filenames
+func (t *OperationsToolImpl) ListFilesBasic(ctx context.Context, dir string) ([]string, error) {
+	return t.filesystemOps.ListFilesBasic(ctx, dir)
+}
+
+// Close releases any resources associated with the tool
+func (t *OperationsToolImpl) Close() error {
+	// If our executor is a UnifiedExecutor, close it
+	if executor, ok := t.executor.(io.Closer); ok {
+		return executor.Close()
+	}
+	return nil
 }

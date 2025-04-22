@@ -84,7 +84,7 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 	}
 
 	// Get image operations tool
-	imageTool, err := a.GetImageTool()
+	imageTool, err := a.GetOperationsTool()
 	if err != nil {
 		return fmt.Errorf("failed to get image operations tool: %w", err)
 	}

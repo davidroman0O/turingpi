@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
+	"github.com/davidroman0O/turingpi/pkg/v2/operations"
 )
 
 // TestOperationsToolWithContainer tests the operations tool using a real container
@@ -27,12 +28,6 @@ func TestOperationsToolWithContainer(t *testing.T) {
 	containerTool := NewContainerTool(registry)
 	if containerTool == nil {
 		t.Fatal("Failed to create container tool")
-	}
-
-	// Create operations tool
-	opsTool, err := NewOperationsTool(containerTool)
-	if err != nil {
-		t.Fatalf("Failed to create operations tool: %v", err)
 	}
 
 	// Create a temporary directory in the current working directory
@@ -56,9 +51,36 @@ func TestOperationsToolWithContainer(t *testing.T) {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Test filesystem operations
-	// Since we don't have a real disk image, we'll just test basic file operations
-	mountDir := tempDir
+	// The container directory where the temp dir will be mounted
+	containerMountPoint := "/testdir"
+
+	// Create a proper container configuration with volume mounts
+	containerConfig := container.ContainerConfig{
+		Image:        "ubuntu:latest",
+		Name:         "test-operations-container",
+		Command:      []string{"sleep", "infinity"}, // Need a command to keep container running
+		Privileged:   true,
+		Capabilities: []string{"SYS_ADMIN"},
+		WorkDir:      containerMountPoint,
+		Mounts:       map[string]string{tempDir: containerMountPoint},
+	}
+
+	// Create operations tool with specific options
+	options := OperationsToolOptions{
+		ContainerTool:          containerTool,
+		ExecutionMode:          operations.ExecuteContainer,
+		ContainerConfig:        containerConfig,
+		UsePersistentContainer: true,
+	}
+
+	opsTool, err := NewOperationsToolWithOptions(options)
+	if err != nil {
+		t.Fatalf("Failed to create operations tool: %v", err)
+	}
+	defer opsTool.Close()
+
+	// Since we're using a container with a mount, use the container mount point as base
+	mountDir := containerMountPoint
 	testOutputPath := "output.txt"
 
 	// Test WriteFile
@@ -67,8 +89,8 @@ func TestOperationsToolWithContainer(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	// Verify the file was created
-	outputFile := filepath.Join(mountDir, testOutputPath)
+	// Verify the file was created in the host (due to mount)
+	outputFile := filepath.Join(tempDir, testOutputPath)
 	if _, err := os.Stat(outputFile); os.IsNotExist(err) {
 		t.Fatalf("Expected file %s to exist", outputFile)
 	}
@@ -84,15 +106,17 @@ func TestOperationsToolWithContainer(t *testing.T) {
 		t.Fatalf("Expected content %q, got %q", testContent, content)
 	}
 
-	// Test CopyFile
+	// Test CopyFile - use an absolute path for the source
+	sourceFilePath := filepath.Join(mountDir, "test.txt")
 	copyDestPath := "copy_output.txt"
-	err = opsTool.CopyFile(ctx, mountDir, outputFile, copyDestPath)
+
+	err = opsTool.CopyFile(ctx, mountDir, sourceFilePath, copyDestPath)
 	if err != nil {
 		t.Fatalf("CopyFile failed: %v", err)
 	}
 
 	// Verify the copy was created
-	copyFile := filepath.Join(mountDir, copyDestPath)
+	copyFile := filepath.Join(tempDir, copyDestPath)
 	if _, err := os.Stat(copyFile); os.IsNotExist(err) {
 		t.Fatalf("Expected file %s to exist", copyFile)
 	}
@@ -141,4 +165,93 @@ func TestNewOperationsTool(t *testing.T) {
 	if !ok {
 		t.Fatal("opsTool does not implement OperationsTool interface")
 	}
+}
+
+// TestNewOperationsToolWithOptions tests creating an operations tool with different options
+func TestNewOperationsToolWithOptions(t *testing.T) {
+	// Create a container registry
+	registry, err := container.NewDockerRegistry()
+	if err != nil {
+		t.Fatalf("Failed to create Docker registry: %v", err)
+	}
+	defer registry.Close()
+
+	// Create a container tool
+	containerTool := NewContainerTool(registry)
+	if containerTool == nil {
+		t.Fatal("Failed to create container tool")
+	}
+
+	// Test with native mode
+	t.Run("NativeMode", func(t *testing.T) {
+		options := OperationsToolOptions{
+			ContainerTool:          containerTool,
+			ExecutionMode:          operations.ExecuteNative,
+			UsePersistentContainer: false,
+		}
+
+		opsTool, err := NewOperationsToolWithOptions(options)
+		if err != nil {
+			t.Fatalf("Failed to create operations tool: %v", err)
+		}
+
+		// Verify it's not nil
+		if opsTool == nil {
+			t.Fatal("Expected non-nil operations tool")
+		}
+
+		// Clean up
+		opsTool.Close()
+	})
+
+	// Test with container mode
+	t.Run("ContainerMode", func(t *testing.T) {
+		options := OperationsToolOptions{
+			ContainerTool:          containerTool,
+			ExecutionMode:          operations.ExecuteContainer,
+			UsePersistentContainer: true,
+			ContainerConfig: container.ContainerConfig{
+				Image:        "ubuntu:latest",
+				Name:         "test-operations-container",
+				Command:      []string{"sleep", "infinity"},
+				Privileged:   true,
+				Capabilities: []string{"SYS_ADMIN"},
+			},
+		}
+
+		opsTool, err := NewOperationsToolWithOptions(options)
+		if err != nil {
+			t.Fatalf("Failed to create operations tool: %v", err)
+		}
+
+		// Verify it's not nil
+		if opsTool == nil {
+			t.Fatal("Expected non-nil operations tool")
+		}
+
+		// Clean up
+		opsTool.Close()
+	})
+
+	// Test with auto mode
+	t.Run("AutoMode", func(t *testing.T) {
+		options := OperationsToolOptions{
+			ContainerTool:          containerTool,
+			ExecutionMode:          operations.ExecuteAuto,
+			UsePersistentContainer: false,
+		}
+
+		opsTool, err := NewOperationsToolWithOptions(options)
+		if err != nil {
+			t.Fatalf("Failed to create operations tool: %v", err)
+		}
+
+		// Verify it's not nil
+		if opsTool == nil {
+			t.Fatal("Expected non-nil operations tool")
+		}
+
+		// Clean up
+		opsTool.Close()
+	})
 }

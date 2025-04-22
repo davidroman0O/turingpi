@@ -282,3 +282,223 @@ func TestCopyFile(t *testing.T) {
 		t.Fatalf("Expected 'source file does not exist' error, got: %v", err)
 	}
 }
+
+// TestListFiles tests the ListFiles function
+func TestListFiles(t *testing.T) {
+	// Create a real executor for integration testing
+	executor := &NativeExecutor{}
+	fsOps := NewFilesystemOperations(executor)
+
+	// Create a temporary directory for our test
+	tempDir, err := os.MkdirTemp("", "listfiles-test")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create various test files and directories
+	fileData := []struct {
+		name    string
+		content string
+		isDir   bool
+		mode    os.FileMode
+	}{
+		{"file1.txt", "File 1 content", false, 0644},
+		{"file2.txt", "File 2 content", false, 0600},
+		{"subdir", "", true, 0755},
+		{".hidden", "Hidden file", false, 0644},
+	}
+
+	for _, fd := range fileData {
+		path := filepath.Join(tempDir, fd.name)
+		if fd.isDir {
+			if err := os.MkdirAll(path, fd.mode); err != nil {
+				t.Fatalf("Failed to create directory %s: %v", path, err)
+			}
+		} else {
+			if err := os.WriteFile(path, []byte(fd.content), fd.mode); err != nil {
+				t.Fatalf("Failed to create file %s: %v", path, err)
+			}
+		}
+	}
+
+	// Test ListFiles
+	ctx := context.Background()
+	files, err := fsOps.ListFiles(ctx, tempDir)
+	if err != nil {
+		t.Fatalf("ListFiles failed: %v", err)
+	}
+
+	// Verify the expected files were found
+	fileMap := make(map[string]bool)
+	for _, file := range files {
+		fileMap[file.Name] = true
+		// Check attributes of known files
+		for _, fd := range fileData {
+			if file.Name == fd.name {
+				if file.IsDir != fd.isDir {
+					t.Errorf("File %s: expected IsDir=%v, got %v", fd.name, fd.isDir, file.IsDir)
+				}
+				break
+			}
+		}
+	}
+
+	// We should have at least the files we created, plus . and ..
+	expectedFiles := len(fileData) + 2
+	if len(files) < expectedFiles {
+		t.Errorf("Expected at least %d files, got %d", expectedFiles, len(files))
+	}
+
+	// Check if all created files are present
+	for _, fd := range fileData {
+		if !fileMap[fd.name] {
+			t.Errorf("File %s not found in results", fd.name)
+		}
+	}
+
+	// Test ListFilesBasic
+	basicFiles, err := fsOps.ListFilesBasic(ctx, tempDir)
+	if err != nil {
+		t.Fatalf("ListFilesBasic failed: %v", err)
+	}
+
+	// Verify the expected files were found
+	basicFileMap := make(map[string]bool)
+	for _, fileName := range basicFiles {
+		basicFileMap[fileName] = true
+	}
+
+	// Check if all created files are present
+	for _, fd := range fileData {
+		if !basicFileMap[fd.name] {
+			t.Errorf("File %s not found in basic results", fd.name)
+		}
+	}
+
+	// Test error case with non-existent directory
+	nonExistentDir := filepath.Join(tempDir, "non-existent-dir")
+	_, err = fsOps.ListFiles(ctx, nonExistentDir)
+	if err == nil {
+		t.Fatalf("Expected error for non-existent directory, got nil")
+	}
+
+	_, err = fsOps.ListFilesBasic(ctx, nonExistentDir)
+	if err == nil {
+		t.Fatalf("Expected error for non-existent directory in basic list, got nil")
+	}
+}
+
+// TestListFilesMock tests the ListFiles function using a mock executor
+func TestListFilesMock(t *testing.T) {
+	ctx := context.Background()
+	mockExec := NewMockExecutor()
+
+	// Set up mock response for ls command
+	lsOutput := `total 20
+drwxr-xr-x 2 user group 4096 2023-05-01 12:00 .
+drwxr-xr-x 3 user group 4096 2023-05-01 11:00 ..
+-rw-r--r-- 1 user group  123 2023-05-01 13:00 file1.txt
+-rw------- 1 user group  456 2023-05-01 14:00 file2.txt
+drwxr-xr-x 2 user group 4096 2023-05-01 15:00 subdir
+lrwxrwxrwx 1 user group    8 2023-05-01 16:00 link.txt -> file1.txt
+`
+	mockExec.MockResponses["ls -la --time-style=iso /test/dir"] = struct {
+		Output []byte
+		Err    error
+	}{
+		Output: []byte(lsOutput),
+		Err:    nil,
+	}
+
+	// Set up mock response for basic ls command
+	lsBasicOutput := `.
+..
+file1.txt
+file2.txt
+subdir
+link.txt
+`
+	mockExec.MockResponses["ls -a /test/dir"] = struct {
+		Output []byte
+		Err    error
+	}{
+		Output: []byte(lsBasicOutput),
+		Err:    nil,
+	}
+
+	// Create filesystem with mock executor
+	fs := NewFilesystemOperations(mockExec)
+
+	// Test ListFiles
+	files, err := fs.ListFiles(ctx, "/test/dir")
+	if err != nil {
+		t.Fatalf("ListFiles failed: %v", err)
+	}
+
+	// Verify the expected files were found
+	if len(files) != 6 {
+		t.Errorf("Expected 6 files (including . and ..), got %d", len(files))
+	}
+
+	// Check for specific files
+	fileMap := make(map[string]FileInfo)
+	for _, file := range files {
+		fileMap[file.Name] = file
+	}
+
+	// Check file1.txt
+	if file, ok := fileMap["file1.txt"]; ok {
+		if file.IsDir {
+			t.Errorf("file1.txt should not be a directory")
+		}
+		if file.Size != 123 {
+			t.Errorf("file1.txt: expected size 123, got %d", file.Size)
+		}
+	} else {
+		t.Errorf("file1.txt not found in results")
+	}
+
+	// Check subdir
+	if file, ok := fileMap["subdir"]; ok {
+		if !file.IsDir {
+			t.Errorf("subdir should be a directory")
+		}
+	} else {
+		t.Errorf("subdir not found in results")
+	}
+
+	// Check symlink
+	if file, ok := fileMap["link.txt"]; ok {
+		if file.SymlinkPath != "file1.txt" {
+			t.Errorf("link.txt: expected symlink to 'file1.txt', got '%s'", file.SymlinkPath)
+		}
+	} else {
+		t.Errorf("link.txt not found in results")
+	}
+
+	// Test ListFilesBasic
+	basicFiles, err := fs.ListFilesBasic(ctx, "/test/dir")
+	if err != nil {
+		t.Fatalf("ListFilesBasic failed: %v", err)
+	}
+
+	// Verify the expected files were found
+	if len(basicFiles) != 6 {
+		t.Errorf("Expected 6 files in basic list, got %d", len(basicFiles))
+	}
+
+	// Check for specific files
+	for _, expectedFile := range []string{".", "..", "file1.txt", "file2.txt", "subdir", "link.txt"} {
+		found := false
+		for _, fileName := range basicFiles {
+			if fileName == expectedFile {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("File %s not found in basic results", expectedFile)
+		}
+	}
+}

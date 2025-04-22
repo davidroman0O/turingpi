@@ -38,6 +38,10 @@ type ContainerConfig struct {
 
 	// Resource limits
 	Resources ResourceLimits
+
+	// InitCommands are commands to run after container startup
+	// Each entry is a complete command with arguments
+	InitCommands [][]string
 }
 
 // ResourceLimits defines container resource constraints

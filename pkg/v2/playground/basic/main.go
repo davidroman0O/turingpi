@@ -41,6 +41,7 @@ func main() {
 			Cache: &config.CacheConfig{
 				LocalDir:  cacheDir,
 				RemoteDir: "/var/cache/turingpi",
+				TempDir:   ".turingpi/tmp",
 			},
 			// No nodes configuration needed!
 		},

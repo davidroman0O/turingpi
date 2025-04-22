@@ -33,19 +33,24 @@ func NewTempFSCache(basePath string) (*TempFSCache, error) {
 	var tempDir string
 	var err error
 
-	// Create a temporary directory either in the system's temp dir or in the specified basePath
-	if basePath == "" {
-		tempDir, err = os.MkdirTemp("", "turingpi-cache-*")
-	} else {
-		// Ensure the base path exists
-		if err := os.MkdirAll(basePath, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create base directory for temp cache: %w", err)
-		}
-		tempDir, err = os.MkdirTemp(basePath, "turingpi-cache-*")
-	}
+	// // Create a temporary directory either in the system's temp dir or in the specified basePath
+	// if basePath == "" {
+	// 	tempDir, err = os.MkdirTemp("", "turingpi-cache-*")
+	// } else {
+	// 	// Ensure the base path exists
+	// 	if err := os.MkdirAll(basePath, 0755); err != nil {
+	// 		return nil, fmt.Errorf("failed to create base directory for temp cache: %w", err)
+	// 	}
+	// 	tempDir, err = os.MkdirTemp(basePath, "turingpi-cache-*")
+	// }
 
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to create temporary directory: %w", err)
+	// }
+
+	tempDir, err = filepath.Abs(basePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary directory: %w", err)
+		return nil, fmt.Errorf("failed to get absolute path for temp directory: %w", err)
 	}
 
 	// Create the underlying FSCache

@@ -6,10 +6,12 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/cache"
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
+	"github.com/davidroman0O/turingpi/pkg/v2/operations"
 	"github.com/davidroman0O/turingpi/pkg/v2/platform"
 )
 
@@ -105,13 +107,13 @@ func NewBMCToolAdapter(bmc bmc.BMC) BMCTool {
 
 // TuringPiToolProvider is the central implementation of the ToolProvider interface
 type TuringPiToolProvider struct {
-	bmcTool       BMCTool
-	imageTool     OperationsTool
-	containerTool ContainerTool
-	localCache    *cache.FSCache
-	remoteCache   *cache.SSHCache
-	tmpCache      *cache.TempFSCache
-	mu            sync.RWMutex
+	bmcTool        BMCTool
+	operationsTool OperationsTool
+	containerTool  ContainerTool
+	localCache     *cache.FSCache
+	remoteCache    *cache.SSHCache
+	tmpCache       *cache.TempFSCache
+	mu             sync.RWMutex
 }
 
 // NewTuringPiToolProvider creates a new TuringPiToolProvider
@@ -164,12 +166,38 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 
 	// Initialize operations-based image tool (skip if Docker is skipped)
 	if !skipDocker && provider.containerTool != nil {
-		opsTool, err := NewOperationsTool(provider.containerTool)
+
+		// Set up container config for the operations tool
+		containerConfig := container.ContainerConfig{
+			Image:        "ubuntu:latest",
+			Name:         fmt.Sprintf("turingpi-operations-%d", time.Now().UnixNano()),
+			Command:      []string{"sleep", "infinity"},
+			Privileged:   true,
+			InitCommands: [][]string{},
+			Capabilities: []string{
+				"SYS_ADMIN", // Required for mount operations
+				"MKNOD",     // Required for device operations
+			},
+			// Set working directory to /workdir
+			WorkDir: "/workdir",
+		}
+
+		// Create operations tool with our container tool and specific config
+		options := OperationsToolOptions{
+			ContainerTool:   provider.containerTool,
+			ExecutionMode:   operations.ExecuteAuto,
+			ContainerConfig: containerConfig,
+			// UsePersistentContainer: true, // Use persistent container for better performance
+		}
+
+		opsTool, err := NewOperationsToolWithOptions(options)
+
+		// opsTool, err := NewOperationsTool(provider.containerTool)
 		if err != nil {
 			// Log the error but continue as this isn't critical
 			fmt.Printf("Warning: Failed to initialize operations tool: %v\n", err)
 		} else {
-			provider.imageTool = opsTool
+			provider.operationsTool = opsTool
 		}
 	} else if skipDocker {
 		fmt.Println("Skipping Docker and operations tools initialization as TURINGPI_SKIP_DOCKER=true")
@@ -197,7 +225,7 @@ func NewTuringPiToolProvider(config *TuringPiToolConfig) (*TuringPiToolProvider,
 		return nil, fmt.Errorf("BMC tool is not initialized")
 	}
 
-	if provider.imageTool == nil {
+	if provider.operationsTool == nil {
 		return nil, fmt.Errorf("image tool is not initialized")
 	}
 
@@ -223,11 +251,53 @@ func (p *TuringPiToolProvider) GetBMCTool() BMCTool {
 	return p.bmcTool
 }
 
-// GetImageTool returns the image tool
-func (p *TuringPiToolProvider) GetImageTool() OperationsTool {
+// GetOperationsTool returns the operations tool instance
+func (p *TuringPiToolProvider) GetOperationsTool() OperationsTool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.imageTool
+
+	if p.operationsTool == nil {
+		p.mu.RUnlock()
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
+		// Double-check
+		if p.operationsTool == nil {
+			// Set up container config for the operations tool
+			containerConfig := container.ContainerConfig{
+				Image:        "ubuntu:latest",
+				Name:         fmt.Sprintf("turingpi-operations-%d", time.Now().UnixNano()),
+				Command:      []string{"sleep", "infinity"},
+				Privileged:   true,
+				InitCommands: [][]string{},
+				Capabilities: []string{
+					"SYS_ADMIN", // Required for mount operations
+					"MKNOD",     // Required for device operations
+				},
+				// Set working directory to /workdir
+				WorkDir: "/workdir",
+			}
+
+			// Create operations tool with our container tool and specific config
+			options := OperationsToolOptions{
+				ContainerTool:          p.GetContainerTool(),
+				ExecutionMode:          operations.ExecuteAuto,
+				ContainerConfig:        containerConfig,
+				UsePersistentContainer: true, // Use persistent container for better performance
+			}
+
+			tool, err := NewOperationsToolWithOptions(options)
+			if err != nil {
+				// Log the error but don't fail - will try again next time
+				fmt.Printf("Failed to create operations tool: %v\n", err)
+				return nil
+			}
+
+			p.operationsTool = tool
+		}
+	}
+
+	return p.operationsTool
 }
 
 // GetContainerTool returns the container tool
@@ -293,57 +363,64 @@ type TuringPiToolConfig struct {
 	RemoteCache *RemoteCacheConfig
 }
 
-// Close cleans up all resources used by the provider
+// Close cleans up resources
 func (p *TuringPiToolProvider) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	var errors []error
+	var multiErr []error
 
-	// Close the container tool
+	// Close and unset the image tool if set
+	if p.operationsTool != nil {
+		if err := p.operationsTool.Close(); err != nil {
+			multiErr = append(multiErr, fmt.Errorf("failed to close image tool: %w", err))
+		}
+		p.operationsTool = nil
+	}
+
+	// Close and unset the container tool if set
 	if p.containerTool != nil {
-		if containerToolCloser, ok := p.containerTool.(interface{ Close() error }); ok {
-			if err := containerToolCloser.Close(); err != nil {
-				errors = append(errors, fmt.Errorf("error closing container tool: %w", err))
-			}
+		if err := p.containerTool.CloseRegistry(); err != nil {
+			multiErr = append(multiErr, fmt.Errorf("failed to close container tool: %w", err))
 		}
+		p.containerTool = nil
 	}
 
-	// Close the caches - order matters here
-	// First close the temporary cache, since it depends on the underlying FSCache
-	if p.tmpCache != nil {
-		if err := p.tmpCache.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("error closing temporary cache: %w", err))
-		}
-		// Clear reference to prevent double close
-		p.tmpCache = nil
-	}
-
-	// Then close the local cache
+	// Close and unset the local cache if set
 	if p.localCache != nil {
 		if err := p.localCache.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("error closing local cache: %w", err))
+			multiErr = append(multiErr, fmt.Errorf("failed to close local cache: %w", err))
 		}
-		// Clear reference to prevent double close
 		p.localCache = nil
 	}
 
-	// Finally close the remote cache
+	// Close and unset the remote cache if set
 	if p.remoteCache != nil {
 		if err := p.remoteCache.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("error closing remote cache: %w", err))
+			multiErr = append(multiErr, fmt.Errorf("failed to close remote cache: %w", err))
 		}
-		// Clear reference to prevent double close
 		p.remoteCache = nil
 	}
 
-	// If there were errors, combine them and return
-	if len(errors) > 0 {
-		errorMsg := "multiple errors closing resources:"
-		for _, err := range errors {
-			errorMsg += "\n" + err.Error()
+	// Close and unset the tmp cache if set
+	if p.tmpCache != nil {
+		if err := p.tmpCache.Close(); err != nil {
+			multiErr = append(multiErr, fmt.Errorf("failed to close tmp cache: %w", err))
 		}
-		return fmt.Errorf(errorMsg)
+		p.tmpCache = nil
+	}
+
+	// Return the first error if any, or nil if no errors
+	if len(multiErr) > 0 {
+		// Combine all errors into one error message
+		var errMsg string
+		for i, err := range multiErr {
+			if i > 0 {
+				errMsg += "; "
+			}
+			errMsg += err.Error()
+		}
+		return fmt.Errorf("multiple errors during close: %s", errMsg)
 	}
 
 	return nil
@@ -407,7 +484,7 @@ func NewTuringPiToolProviderForTesting(config *TuringPiToolConfig, skipChecks bo
 			// Log the error but continue as this isn't critical
 			fmt.Printf("Warning: Failed to initialize operations tool: %v\n", err)
 		} else {
-			provider.imageTool = opsTool
+			provider.operationsTool = opsTool
 		}
 	} else if skipDocker && !skipChecks {
 		fmt.Println("Skipping Docker and operations tools initialization as TURINGPI_SKIP_DOCKER=true")
@@ -441,7 +518,7 @@ func NewTuringPiToolProviderForTesting(config *TuringPiToolConfig, skipChecks bo
 		return nil, fmt.Errorf("BMC tool is not initialized")
 	}
 
-	if provider.imageTool == nil {
+	if provider.operationsTool == nil {
 		return nil, fmt.Errorf("image tool is not initialized")
 	}
 

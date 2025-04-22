@@ -327,7 +327,51 @@ func (r *DockerRegistry) Create(ctx context.Context, config ContainerConfig) (Co
 	r.containers[resp.ID] = container
 	r.mu.Unlock()
 
+	// If we have initialization commands and the container is not going to exit immediately
+	// start the container and run the init commands
+	if len(config.InitCommands) > 0 && !isShortLivedCommand(config.Command) {
+		// Start the container
+		if err := container.Start(ctx); err != nil {
+			// If start fails, clean up and return error
+			_ = container.Cleanup(ctx)
+			r.mu.Lock()
+			delete(r.containers, resp.ID)
+			r.mu.Unlock()
+			return nil, fmt.Errorf("failed to start container for init commands: %w", err)
+		}
+
+		// Execute initialization commands
+		for _, cmd := range config.InitCommands {
+			if _, err := container.Exec(ctx, cmd); err != nil {
+				// If any command fails, clean up and return error
+				_ = container.Cleanup(ctx)
+				r.mu.Lock()
+				delete(r.containers, resp.ID)
+				r.mu.Unlock()
+				return nil, fmt.Errorf("initialization command %v failed: %w", cmd, err)
+			}
+		}
+	}
+
 	return container, nil
+}
+
+// isShortLivedCommand determines if a command is likely to exit immediately
+// We don't want to run init commands for containers that exit immediately
+func isShortLivedCommand(cmd []string) bool {
+	if len(cmd) == 0 {
+		return false
+	}
+
+	// Common short-lived commands
+	shortLivedCmds := map[string]bool{
+		"echo":  true,
+		"true":  true,
+		"false": true,
+		"exit":  true,
+	}
+
+	return shortLivedCmds[cmd[0]]
 }
 
 // Get implements Registry.Get

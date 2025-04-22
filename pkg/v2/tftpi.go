@@ -3,11 +3,14 @@ package tftpi
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/gostage/store"
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/config"
+	"github.com/davidroman0O/turingpi/pkg/v2/container"
 	"github.com/davidroman0O/turingpi/pkg/v2/keys"
 	"github.com/davidroman0O/turingpi/pkg/v2/tools"
 )
@@ -92,6 +95,88 @@ func New(opts ...Option) (*TuringPiProvider, error) {
 			return nil, fmt.Errorf("failed to initialize tool providers: %w", err)
 		}
 	}
+
+	// We will create a container for each workflow if we are running in Docker mode
+	// Eitherway it will still create a tmp dir for the workflow
+	// If we have a non-linux machine OR forced docker mode, we will create a container which will be used for one workflow
+	provider.Runner.Use(func(next gostage.RunnerFunc) gostage.RunnerFunc {
+		return func(ctx context.Context, w *gostage.Workflow, logger gostage.Logger) error {
+			logger.Info("Starting workflow: %s", w.Name)
+
+			clusterName, err := store.Get[string](w.Store, "turingpi.targetCluster")
+			if err != nil {
+				return fmt.Errorf("failed to get target cluster: %w", err)
+			}
+
+			localName := fmt.Sprintf("tftpi-workflow-%v", w.ID)
+
+			localProvider := provider.toolProviders[clusterName] // TODO: make sure we don't have locks/race
+
+			localCacheDir := localProvider.GetLocalCache().Location()
+
+			tmpDir, err := localProvider.GetTmpCache().CreateTempDir(ctx, localName)
+			if err != nil {
+				return fmt.Errorf("failed to create temp directory: %w", err)
+			}
+
+			absLocalCacheDir, err := filepath.Abs(localCacheDir)
+			if err != nil {
+				return fmt.Errorf("failed to get absolute path for local cache directory: %w", err)
+			}
+
+			absTmpDir, err := filepath.Abs(tmpDir)
+			if err != nil {
+				return fmt.Errorf("failed to get absolute path for temp directory: %w", err)
+			}
+
+			w.Store.Put("workflow.cache.dir", absLocalCacheDir)
+			w.Store.Put("workflow.tmp.dir", absTmpDir)
+
+			ctn, err := localProvider.GetContainerTool().CreateContainer(ctx, container.ContainerConfig{
+				Image: "alpine:latest", // TODO: make this configurable
+				Name:  localName,
+				Mounts: map[string]string{
+					absLocalCacheDir: "/cache",
+					absTmpDir:        "/tmp",
+				},
+				InitCommands: [][]string{ // TODO: make this configurable
+					{"apk", "add", "--no-cache", "xz"},
+				},
+				Command: []string{"sleep", "infinity"},
+			})
+
+			if err != nil {
+				return fmt.Errorf("failed to create container: %w", err)
+			}
+
+			if ctx != nil && ctn.ID() != "" {
+				logger.Info("Container created successfully: %s", ctn.ID())
+				w.Store.Put("workflow.container.id", ctn.ID())
+			} else {
+				return fmt.Errorf("No container created")
+			}
+
+			// Add defer to ensure cleanup happens no matter how we exit this function
+			defer func() {
+				cleanupErr := ctn.Cleanup(ctx)
+				if cleanupErr != nil {
+					logger.Error("Failed to clean up container: %v", cleanupErr)
+				} else {
+					logger.Info("Container cleaned up successfully")
+				}
+			}()
+
+			err = next(ctx, w, logger)
+
+			// Remove tmp dir
+			if err := os.RemoveAll(tmpDir); err != nil {
+				logger.Error("Failed to remove temp directory: %v", err)
+			}
+
+			logger.Info("Completed workflow: %s", w.Name)
+			return err
+		}
+	})
 
 	return provider, nil
 }
@@ -202,7 +287,7 @@ func (t *TuringPiProvider) Execute(ctx context.Context, workflow *gostage.Workfl
 		// Print provider details
 		logger.Info("Provider details - BMC tool: %v, Image tool: %v, Container tool: %v, LocalCache: %v, RemoteCache: %v",
 			provider.GetBMCTool() != nil,
-			provider.GetImageTool() != nil,
+			provider.GetOperationsTool() != nil,
 			provider.GetContainerTool() != nil,
 			provider.GetLocalCache() != nil,
 			provider.GetRemoteCache() != nil)

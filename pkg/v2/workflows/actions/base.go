@@ -79,6 +79,7 @@ func (a *TuringPiAction) Execute(ctx *gostage.ActionContext) error {
 	}
 
 	// Check platform type to determine execution path
+	// TODO: make sure it is also not forced docker execution
 	if platform.IsLinux() {
 		// Direct execution on Linux
 		ctx.Logger.Debug("Using native execution path (Linux)")
@@ -143,13 +144,13 @@ func (a *TuringPiAction) GetBMCTool() (tools.BMCTool, error) {
 	return bmcTool, nil
 }
 
-// GetImageTool returns the image tool
-func (a *TuringPiAction) GetImageTool() (tools.OperationsTool, error) {
+// GetOperationsTool returns the image tool
+func (a *TuringPiAction) GetOperationsTool() (tools.OperationsTool, error) {
 	if a.toolsInitErr != nil {
 		return nil, a.toolsInitErr
 	}
 
-	imageTool := a.tools.GetImageTool()
+	imageTool := a.tools.GetOperationsTool()
 	if imageTool == nil {
 		return nil, errors.New("image tool is not available")
 	}

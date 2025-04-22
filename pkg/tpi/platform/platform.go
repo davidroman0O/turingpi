@@ -76,6 +76,9 @@ type DockerExecutionConfig struct {
 	ContainerName string
 	// UseUniqueContainerName determines whether to generate a unique name for each container
 	UseUniqueContainerName bool
+	// InitCommands are commands to run after container startup
+	// Each entry is a complete command with arguments
+	InitCommands [][]string
 }
 
 // NewDefaultDockerConfig creates a default Docker execution configuration

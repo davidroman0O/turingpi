@@ -46,6 +46,11 @@ func NewDockerAdapter(config *platform.DockerExecutionConfig) (*DockerAdapter, e
 		containerConfig.Mounts[hostPath] = containerPath
 	}
 
+	// Add initialization commands if provided in config
+	if len(config.InitCommands) > 0 {
+		containerConfig.InitCommands = config.InitCommands
+	}
+
 	// Create container
 	ctx := context.Background()
 	container, err := registry.Create(ctx, containerConfig)
@@ -54,11 +59,13 @@ func NewDockerAdapter(config *platform.DockerExecutionConfig) (*DockerAdapter, e
 		return nil, fmt.Errorf("failed to create container: %w", err)
 	}
 
-	// Start container
-	if err := container.Start(ctx); err != nil {
-		container.Cleanup(ctx)
-		registry.Close()
-		return nil, fmt.Errorf("failed to start container: %w", err)
+	// Start container if not already started by initialization commands
+	if len(containerConfig.InitCommands) == 0 {
+		if err := container.Start(ctx); err != nil {
+			container.Cleanup(ctx)
+			registry.Close()
+			return nil, fmt.Errorf("failed to start container: %w", err)
+		}
 	}
 
 	return &DockerAdapter{

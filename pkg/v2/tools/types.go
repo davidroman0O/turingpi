@@ -8,6 +8,7 @@ import (
 	"github.com/davidroman0O/turingpi/pkg/v2/bmc"
 	"github.com/davidroman0O/turingpi/pkg/v2/cache"
 	"github.com/davidroman0O/turingpi/pkg/v2/container"
+	"github.com/davidroman0O/turingpi/pkg/v2/operations"
 )
 
 // BMCTool provides an interface for interacting with the BMC (Board Management Controller)
@@ -144,6 +145,12 @@ type OperationsTool interface {
 	MakeDirectory(ctx context.Context, mountDir, path string, perm fs.FileMode) error
 	// ChangePermissions changes the permissions of a file or directory
 	ChangePermissions(ctx context.Context, mountDir, path string, perm fs.FileMode) error
+	// ListFiles lists files at a given location with detailed information
+	ListFiles(ctx context.Context, dir string) ([]operations.FileInfo, error)
+	// ListFilesBasic lists files at a given location and returns just the filenames
+	ListFilesBasic(ctx context.Context, dir string) ([]string, error)
+	// Close releases any resources associated with the tool
+	Close() error
 }
 
 // ToolProvider provides access to all the tools
@@ -151,7 +158,7 @@ type ToolProvider interface {
 	// GetBMCTool returns the BMC tool
 	GetBMCTool() BMCTool
 	// GetImageTool returns the image tool
-	GetImageTool() OperationsTool
+	GetOperationsTool() OperationsTool
 	// GetContainerTool returns the container tool
 	GetContainerTool() ContainerTool
 	// GetLocalCache returns the local filesystem cache
