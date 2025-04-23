@@ -4,9 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
 )
 
 // SSHConfig holds the configuration for SSH connections
@@ -24,7 +29,7 @@ type SSHExecutor struct {
 }
 
 // NewSSHExecutorFromConfig creates a new SSHExecutor from a config file
-func NewSSHExecutorFromConfig(configPath string) (CommandExecutor, error) {
+func NewSSHExecutorFromConfig(configPath string) (*SSHExecutor, error) {
 	// Read and parse the SSH config file
 	configFile, err := os.Open(configPath)
 	if err != nil {
@@ -48,7 +53,7 @@ func NewSSHExecutorFromConfig(configPath string) (CommandExecutor, error) {
 }
 
 // NewSSHExecutor creates a new SSHExecutor from direct connection parameters
-func NewSSHExecutor(host string, port int, user, password string) CommandExecutor {
+func NewSSHExecutor(host string, port int, user, password string) *SSHExecutor {
 	return &SSHExecutor{
 		config: SSHConfig{
 			Host:     host,
@@ -96,4 +101,77 @@ func (s *SSHExecutor) ExecuteCommand(command string) (stdout string, stderr stri
 	stderr = strings.TrimSuffix(stderr, "\n")
 
 	return stdout, stderr, err
+}
+
+// getSSHClientConfig creates an SSH client config from SSHConfig
+func (s *SSHExecutor) getSSHClientConfig() *ssh.ClientConfig {
+	return &ssh.ClientConfig{
+		User: s.config.User,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(s.config.Password),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+}
+
+// UploadFile implements FileUploader interface to upload files via SFTP
+func (s *SSHExecutor) UploadFile(localPath, remotePath string) error {
+	// Create SSH connection configuration
+	sshConfig := s.getSSHClientConfig()
+
+	// Connect to remote server
+	addr := fmt.Sprintf("%s:22", s.config.Host)
+	log.Printf("[BMC SCP UPLOAD] Connecting to %s...", addr)
+	conn, err := ssh.Dial("tcp", addr, sshConfig)
+	if err != nil {
+		return fmt.Errorf("ssh dial for sftp to %s failed: %w", addr, err)
+	}
+	defer conn.Close()
+
+	log.Println("[BMC SCP UPLOAD] Creating SFTP client...")
+	client, err := sftp.NewClient(conn)
+	if err != nil {
+		return fmt.Errorf("sftp client creation failed: %w", err)
+	}
+	defer client.Close()
+
+	remoteDir := filepath.Dir(remotePath)
+	log.Printf("[BMC SCP UPLOAD] Ensuring remote directory exists: %s", remoteDir)
+	// MkdirAll creates parent directories as needed.
+	if err := client.MkdirAll(remoteDir); err != nil {
+		// Ignore error if directory already exists, handle others
+		// Stat returns an error if path doesn't exist
+		if _, statErr := client.Stat(remoteDir); os.IsNotExist(statErr) {
+			return fmt.Errorf("failed to create remote directory %s: %w", remoteDir, err)
+		}
+		// If Stat succeeded, directory exists, ignore MkdirAll error
+		log.Printf("[BMC SCP UPLOAD] Remote directory %s likely already exists.", remoteDir)
+	} else {
+		log.Printf("[BMC SCP UPLOAD] Created remote directory %s.", remoteDir)
+	}
+
+	log.Printf("[BMC SCP UPLOAD] Opening local file: %s", localPath)
+	srcFile, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer srcFile.Close()
+
+	log.Printf("[BMC SCP UPLOAD] Creating remote file: %s", remotePath)
+	dstFile, err := client.Create(remotePath)
+	if err != nil {
+		return fmt.Errorf("failed to create remote file %s: %w", remotePath, err)
+	}
+	defer dstFile.Close()
+
+	log.Printf("[BMC SCP UPLOAD] Copying data...")
+	bytesCopied, err := io.Copy(dstFile, srcFile)
+	if err != nil {
+		// Attempt to remove partially uploaded file on error
+		_ = client.Remove(remotePath)
+		return fmt.Errorf("failed to copy file content: %w", err)
+	}
+
+	log.Printf("[BMC SCP UPLOAD] Successfully copied %d bytes to %s", bytesCopied, remotePath)
+	return nil
 }

@@ -2,8 +2,11 @@ package bmc
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -564,4 +567,185 @@ func testNodePowerOperations(t *testing.T, ctx context.Context, bmc BMC, nodeID 
 // Helper function to check if BMC reboot test is enabled
 func isBMCRebootTestEnabled() bool {
 	return false // Change this to check for an environment variable if needed
+}
+
+// TestUploadFile tests the SSHExecutor's UploadFile function
+func TestUploadFile(t *testing.T) {
+	// Skip if running short tests
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Read the config file
+	configPath := filepath.Join("../cache/testdata/ssh_config.json")
+	configFile, err := os.Open(configPath)
+	if err != nil {
+		t.Fatalf("Failed to open SSH config file: %v", err)
+	}
+	defer configFile.Close()
+
+	// Parse the config
+	configData, err := io.ReadAll(configFile)
+	if err != nil {
+		t.Fatalf("Failed to read SSH config file: %v", err)
+	}
+
+	var config SSHConfig
+	if err := json.Unmarshal(configData, &config); err != nil {
+		t.Fatalf("Failed to parse SSH config: %v", err)
+	}
+
+	// Create a temporary local file to upload
+	localFile, err := os.CreateTemp("", "upload-test-*.txt")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	localPath := localFile.Name()
+	defer os.Remove(localPath) // Clean up the temp file at the end
+
+	// Write some test data to the file
+	testData := []byte("This is a test file for UploadFile test.\nIt has multiple lines.\n")
+	if _, err := localFile.Write(testData); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	localFile.Close()
+
+	// Define remote path
+	remotePath := fmt.Sprintf("/tmp/test-upload-%d.txt", time.Now().UnixNano())
+
+	// Create SSHExecutor
+	executor := &SSHExecutor{
+		config: config,
+	}
+
+	// Upload the file
+	t.Logf("Uploading %s to %s", localPath, remotePath)
+	err = executor.UploadFile(localPath, remotePath)
+	if err != nil {
+		t.Fatalf("Failed to upload file: %v", err)
+	}
+
+	// Verify the upload by executing a command to check the file exists and has the correct content
+	bmc, err := NewWithSSH(configPath)
+	if err != nil {
+		t.Fatalf("Failed to create BMC with SSH: %v", err)
+	}
+
+	// Use a context with timeout for all operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Check file exists
+	stdout, stderr, err := bmc.ExecuteCommand(ctx, fmt.Sprintf("ls -l %s", remotePath))
+	if err != nil {
+		t.Fatalf("Failed to verify file exists: %v (stderr: %s)", err, stderr)
+	}
+	if !strings.Contains(stdout, remotePath) {
+		t.Errorf("File not found on remote system: %s", remotePath)
+	} else {
+		t.Logf("File found on remote system: %s", stdout)
+	}
+
+	// Check file content
+	stdout, stderr, err = bmc.ExecuteCommand(ctx, fmt.Sprintf("cat %s", remotePath))
+	if err != nil {
+		t.Fatalf("Failed to read remote file: %v (stderr: %s)", err, stderr)
+	}
+
+	// Normalize line endings for comparison
+	expectedContent := strings.TrimSpace(string(testData))
+	actualContent := strings.TrimSpace(stdout)
+
+	if expectedContent != actualContent {
+		t.Errorf("File content mismatch. Expected:\n%s\nGot:\n%s", expectedContent, actualContent)
+	} else {
+		t.Logf("File content matches expected data")
+	}
+
+	// Clean up the remote file
+	_, stderr, err = bmc.ExecuteCommand(ctx, fmt.Sprintf("rm %s", remotePath))
+	if err != nil {
+		t.Logf("Warning: Failed to remove remote file: %v (stderr: %s)", err, stderr)
+	} else {
+		t.Logf("Successfully removed remote file: %s", remotePath)
+	}
+}
+
+// TestBMC_UploadFile tests the UploadFile method on the BMC interface
+func TestBMC_UploadFile(t *testing.T) {
+	// Skip if running short tests
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	// Setup BMC connection
+	configPath := filepath.Join("../cache/testdata/ssh_config.json")
+	bmc, err := NewWithSSH(configPath)
+	if err != nil {
+		t.Fatalf("Failed to create BMC with SSH: %v", err)
+	}
+
+	// Create a temporary local file to upload
+	localFile, err := os.CreateTemp("", "bmc-upload-test-*.txt")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	localPath := localFile.Name()
+	defer os.Remove(localPath) // Clean up the temp file at the end
+
+	// Write some test data to the file
+	testData := []byte("This is a test file for BMC.UploadFile test.\nTesting BMC interface method.\n")
+	if _, err := localFile.Write(testData); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	localFile.Close()
+
+	// Define remote path
+	remotePath := fmt.Sprintf("/tmp/bmc-test-upload-%d.txt", time.Now().UnixNano())
+
+	// Use a context with timeout for all operations
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Upload the file using the BMC interface
+	t.Logf("Uploading %s to %s", localPath, remotePath)
+	err = bmc.UploadFile(ctx, localPath, remotePath)
+	if err != nil {
+		t.Fatalf("Failed to upload file: %v", err)
+	}
+
+	// Verify the upload
+	stdout, stderr, err := bmc.ExecuteCommand(ctx, fmt.Sprintf("ls -l %s", remotePath))
+	if err != nil {
+		t.Fatalf("Failed to verify file exists: %v (stderr: %s)", err, stderr)
+	}
+	if !strings.Contains(stdout, remotePath) {
+		t.Errorf("File not found on remote system: %s", remotePath)
+	} else {
+		t.Logf("File found on remote system: %s", stdout)
+	}
+
+	// Check file content
+	stdout, stderr, err = bmc.ExecuteCommand(ctx, fmt.Sprintf("cat %s", remotePath))
+	if err != nil {
+		t.Fatalf("Failed to read remote file: %v (stderr: %s)", err, stderr)
+	}
+
+	// Normalize line endings for comparison
+	expectedContent := strings.TrimSpace(string(testData))
+	actualContent := strings.TrimSpace(stdout)
+
+	if expectedContent != actualContent {
+		t.Errorf("File content mismatch. Expected:\n%s\nGot:\n%s", expectedContent, actualContent)
+	} else {
+		t.Logf("File content matches expected data")
+	}
+
+	// Clean up the remote file
+	_, stderr, err = bmc.ExecuteCommand(ctx, fmt.Sprintf("rm %s", remotePath))
+	if err != nil {
+		t.Logf("Warning: Failed to remove remote file: %v (stderr: %s)", err, stderr)
+	} else {
+		t.Logf("Successfully removed remote file: %s", remotePath)
+	}
 }

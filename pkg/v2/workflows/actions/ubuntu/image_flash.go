@@ -94,24 +94,23 @@ func (a *ImageFlashAction) executeImpl(ctx *gostage.ActionContext, toolsProvider
 	ctx.Logger.Info("Flashing image to node %d", nodeID)
 	ctx.Logger.Info("Image path: %s", remoteImagePath)
 
-	flashCmd := fmt.Sprintf("tpi flash --node %d %s", nodeID, remoteImagePath)
-	stdout, stderr, err := bmcTool.ExecuteCommand(context.Background(), flashCmd)
+	// Use the proper BMC interface method instead of directly executing the command
+	err = bmcTool.FlashNode(context.Background(), nodeID, remoteImagePath)
 	if err != nil {
-		return fmt.Errorf("failed to flash node: %w (stderr: %s)", err, stderr)
+		return fmt.Errorf("failed to flash node: %w", err)
 	}
 
-	ctx.Logger.Info("Flash command output: %s", stdout)
 	ctx.Logger.Info("Image flashed successfully to node %d", nodeID)
 
 	// Set node mode to normal using ExecuteCommand
 	ctx.Logger.Info("Setting node %d mode to normal", nodeID)
-	modeCmd := fmt.Sprintf("tpi advanced --node %d normal", nodeID)
-	stdout, stderr, err = bmcTool.ExecuteCommand(context.Background(), modeCmd)
+
+	err = bmcTool.SetNodeMode(context.Background(), nodeID, bmc.NodeModeNormal)
 	if err != nil {
-		return fmt.Errorf("failed to set node mode to normal: %w (stderr: %s)", err, stderr)
+		return fmt.Errorf("failed to set node mode to normal: %w ", err)
 	}
 
-	ctx.Logger.Info("Node mode set to normal. Output: %s", stdout)
+	ctx.Logger.Info("Node mode set to normal.")
 
 	// Store flash completion in context
 	if err := ctx.Store().Put("FlashCompleted", true); err != nil {

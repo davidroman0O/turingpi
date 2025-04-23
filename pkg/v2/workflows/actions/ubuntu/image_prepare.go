@@ -78,6 +78,11 @@ func (a *ImagePrepareAction) ExecuteDocker(ctx *gostage.ActionContext, tools too
 		return fmt.Errorf("source file does not exist: %s", sourceImagePath)
 	}
 
+	// get path without filename
+	sourceImageDir := filepath.Dir(sourceImagePath)
+
+	ctx.Workflow.Store.Put("ubuntu.image.source.dir", sourceImageDir)
+
 	// get the source image name
 	sourceImageName := filepath.Base(sourceImagePath) // just get the filename
 
@@ -154,6 +159,10 @@ func (a *ImagePrepareAction) ExecuteDocker(ctx *gostage.ActionContext, tools too
 
 		if _, err := tools.GetOperationsTool().DecompressXZ(ctx.GoContext, fmt.Sprintf("/tmp/%s", sourceImageName), "/tmp"); err != nil {
 			return fmt.Errorf("failed to decompress image: %w", err)
+		}
+
+		if err := tools.GetOperationsTool().Remove(ctx.GoContext, fmt.Sprintf("/tmp/%s", sourceImageName), false); err != nil {
+			return fmt.Errorf("failed to remove source image: %w", err)
 		}
 
 		ctx.Workflow.Store.Put("ubuntu.image.decompressed.path", "/tmp")

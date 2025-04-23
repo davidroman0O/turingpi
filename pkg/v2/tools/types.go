@@ -41,6 +41,12 @@ type BMCTool interface {
 	SetBootMode(ctx context.Context, nodeID int, mode string) error
 	// GetBootMode gets the current boot mode for a specific node
 	GetBootMode(ctx context.Context, nodeID int) (string, error)
+	// FlashNode flashes a node with an image
+	FlashNode(ctx context.Context, nodeID int, imagePath string) error
+	// SetNodeMode sets a node to a specific operating mode
+	SetNodeMode(ctx context.Context, nodeID int, mode bmc.NodeMode) error
+	// UploadFile uploads a file from the local filesystem to the BMC
+	UploadFile(ctx context.Context, localPath, remotePath string) error
 }
 
 // ContainerTool provides an interface for working with containers

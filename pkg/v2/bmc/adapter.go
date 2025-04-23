@@ -139,6 +139,13 @@ type BMC interface {
 	// timeout is the maximum time to wait for each expected string
 	ExpectAndSend(ctx context.Context, nodeID int, steps []InteractionStep, timeout time.Duration) (string, error)
 
+	// File Operations
+
+	// UploadFile uploads a file from the local filesystem to the BMC
+	// localPath is the path to the local file
+	// remotePath is the destination path on the BMC
+	UploadFile(ctx context.Context, localPath, remotePath string) error
+
 	// Generic Command Execution
 
 	// ExecuteCommand executes a BMC-specific command

@@ -21,6 +21,11 @@ type CommandExecutor interface {
 	ExecuteCommand(command string) (stdout string, stderr string, err error)
 }
 
+// FileUploader defines an interface for uploading files
+type FileUploader interface {
+	UploadFile(localPath, remotePath string) error
+}
+
 // New creates a new BMC instance
 func New(executor CommandExecutor) BMC {
 	return &bmcImpl{
@@ -453,7 +458,8 @@ func (b *bmcImpl) FlashNode(ctx context.Context, nodeID int, imagePath string) e
 		return fmt.Errorf("image path cannot be empty")
 	}
 
-	cmd := fmt.Sprintf("tpi flash --node %d %s", nodeID, imagePath)
+	// Using the correct format: tpi flash --node <NODE> -i <IMAGE_PATH>
+	cmd := fmt.Sprintf("tpi flash --node %d -i %s", nodeID, imagePath)
 	_, stderr, err := b.executor.ExecuteCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to flash node %d with image %s: %w (stderr: %s)", nodeID, imagePath, err, stderr)
@@ -488,4 +494,15 @@ func (b *bmcImpl) SendUARTInput(ctx context.Context, nodeID int, input string) e
 		return fmt.Errorf("failed to send UART input to node %d: %w (stderr: %s)", nodeID, err, stderr)
 	}
 	return nil
+}
+
+// UploadFile uploads a file to the BMC via SFTP
+func (b *bmcImpl) UploadFile(ctx context.Context, localPath, remotePath string) error {
+	// Check if the executor supports file uploads
+	uploader, ok := b.executor.(FileUploader)
+	if !ok {
+		return fmt.Errorf("file upload not supported by the current executor")
+	}
+
+	return uploader.UploadFile(localPath, remotePath)
 }

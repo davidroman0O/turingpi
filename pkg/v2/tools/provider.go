@@ -98,6 +98,21 @@ func (a *BMCToolAdapter) GetBootMode(ctx context.Context, nodeID int) (string, e
 	return "normal", fmt.Errorf("GetBootMode not implemented")
 }
 
+// SetNodeMode sets a node to a specific operating mode
+func (a *BMCToolAdapter) SetNodeMode(ctx context.Context, nodeID int, mode bmc.NodeMode) error {
+	return a.bmc.SetNodeMode(ctx, nodeID, mode)
+}
+
+// FlashNode flashes a node with an image
+func (a *BMCToolAdapter) FlashNode(ctx context.Context, nodeID int, imagePath string) error {
+	return a.bmc.FlashNode(ctx, nodeID, imagePath)
+}
+
+// UploadFile uploads a file from the local filesystem to the BMC
+func (a *BMCToolAdapter) UploadFile(ctx context.Context, localPath, remotePath string) error {
+	return a.bmc.UploadFile(ctx, localPath, remotePath)
+}
+
 // NewBMCToolAdapter creates a new BMCToolAdapter from a bmc.BMC instance
 func NewBMCToolAdapter(bmc bmc.BMC) BMCTool {
 	return &BMCToolAdapter{
