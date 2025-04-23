@@ -38,7 +38,7 @@ type BMCTool interface {
 	// GetSerialConsole connects to the serial console of a specific node
 	GetSerialConsole(ctx context.Context, nodeID int) (io.ReadWriteCloser, error)
 	// SetBootMode sets the boot mode for a specific node
-	SetBootMode(ctx context.Context, nodeID int, mode string) error
+	SetBootMode(ctx context.Context, nodeID int, mode bmc.NodeMode) error
 	// GetBootMode gets the current boot mode for a specific node
 	GetBootMode(ctx context.Context, nodeID int) (string, error)
 	// FlashNode flashes a node with an image

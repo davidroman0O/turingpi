@@ -2,6 +2,7 @@ package ubuntu
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/turingpi/workflows/actions/common"
@@ -52,9 +53,24 @@ func CreateUbuntuRK1Deployment(nodeID int, options UbuntuRK1DeploymentOptions) *
 
 	if options.NetworkConfig != nil {
 		workflow.Store.Put("Hostname", options.NetworkConfig.Hostname)
+
+		// Store the combined IPCIDR
 		workflow.Store.Put("IPCIDR", options.NetworkConfig.IPCIDR)
+
+		// Also split and store IP and CIDR separately
+		if options.NetworkConfig.IPCIDR != "" {
+			parts := strings.Split(options.NetworkConfig.IPCIDR, "/")
+			if len(parts) == 2 {
+				workflow.Store.Put("IPAddress", parts[0])
+				workflow.Store.Put("IPCIDRSuffix", parts[1])
+			}
+		}
+
 		workflow.Store.Put("Gateway", options.NetworkConfig.Gateway)
+
+		// Store DNS servers both as string and as slice
 		workflow.Store.Put("DNSServers", fmt.Sprintf("%v", options.NetworkConfig.DNSServers))
+		workflow.Store.Put("DNSServersList", options.NetworkConfig.DNSServers)
 	}
 
 	// Add initialization stage to set up node ID

@@ -17,9 +17,8 @@ func CreateImageDeploymentStage() *gostage.Stage {
 	)
 
 	// Add actions in sequence
-	stage.AddAction(ubuntuActions.NewImageUploadAction()) // First upload the image to BMC
-	stage.AddAction(ubuntuActions.NewImageFlashAction())  // Then flash it to the node
-	stage.AddAction(common.NewWaitAction(10))             // Wait for flash to complete and node to start booting
+	stage.AddAction(ubuntuActions.NewImageFlashAction()) // Then flash it to the node
+	stage.AddAction(common.NewWaitAction(10))            // Wait for flash to complete and node to start booting
 	stage.AddAction(ubuntuActions.NewUARTMonitorAction())
 
 	return stage

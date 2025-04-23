@@ -9,6 +9,7 @@ import (
 
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/gostage/store"
+	"github.com/davidroman0O/turingpi/bmc"
 	"github.com/davidroman0O/turingpi/keys"
 	"github.com/davidroman0O/turingpi/tools"
 	"github.com/davidroman0O/turingpi/workflows/actions"
@@ -81,6 +82,11 @@ func (a *UARTMonitorAction) executeImpl(ctx *gostage.ActionContext, toolsProvide
 	// Store boot status updates
 	if err := ctx.Store().Put("BootStatus", "starting"); err != nil {
 		return fmt.Errorf("failed to store boot status: %w", err)
+	}
+
+	err = toolsProvider.GetBMCTool().SetBootMode(ctx.GoContext, nodeID, bmc.NodeModeNormal)
+	if err != nil {
+		return fmt.Errorf("failed to set boot mode: %w", err)
 	}
 
 	// Monitor UART output with polling

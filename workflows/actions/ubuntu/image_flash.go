@@ -110,6 +110,11 @@ func (a *ImageFlashAction) executeImpl(ctx *gostage.ActionContext, toolsProvider
 		return fmt.Errorf("failed to set node mode to normal: %w ", err)
 	}
 
+	err = bmcTool.PowerOn(ctx.GoContext, 1)
+	if err != nil {
+		return fmt.Errorf("failed to power on node: %w", err)
+	}
+
 	ctx.Logger.Info("Node mode set to normal.")
 
 	// Store flash completion in context

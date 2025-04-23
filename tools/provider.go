@@ -87,9 +87,8 @@ func (a *BMCToolAdapter) GetSerialConsole(ctx context.Context, nodeID int) (io.R
 }
 
 // SetBootMode sets the boot mode for a specific node
-func (a *BMCToolAdapter) SetBootMode(ctx context.Context, nodeID int, mode string) error {
-	// Not implemented in the base BMC
-	return fmt.Errorf("SetBootMode not implemented")
+func (a *BMCToolAdapter) SetBootMode(ctx context.Context, nodeID int, mode bmc.NodeMode) error {
+	return a.bmc.SetNodeMode(ctx, nodeID, mode)
 }
 
 // GetBootMode gets the current boot mode for a specific node

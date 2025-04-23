@@ -89,37 +89,86 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 	}()
 
 	// Apply network configuration if provided
+	ctx.Logger.Info("Checking for network configuration parameters...")
+
 	hostname, err := store.GetOrDefault[string](ctx.Store(), "Hostname", "")
 	hasHostname := err == nil && hostname != ""
 
-	ipCIDR, err := store.GetOrDefault[string](ctx.Store(), "IPCIDR", "")
-	hasIPCIDR := err == nil && ipCIDR != ""
+	// Get IP address and CIDR separately like in the old codebase
+	ipAddr, err := store.GetOrDefault[string](ctx.Store(), "IPAddress", "")
+	hasIPAddr := err == nil && ipAddr != ""
+
+	cidrSuffix, err := store.GetOrDefault[string](ctx.Store(), "IPCIDRSuffix", "")
+	hasCIDR := err == nil && cidrSuffix != ""
+
+	// If separate IP/CIDR not found, try to get and split the combined IPCIDR
+	if !hasIPAddr || !hasCIDR {
+		ipCIDR, err := store.GetOrDefault[string](ctx.Store(), "IPCIDR", "")
+		if err == nil && ipCIDR != "" {
+			parts := strings.Split(ipCIDR, "/")
+			if len(parts) == 2 {
+				ipAddr = parts[0]
+				cidrSuffix = "/" + parts[1]
+				hasIPAddr = true
+				hasCIDR = true
+				ctx.Logger.Info("Split IPCIDR %s into IP=%s and CIDR=%s", ipCIDR, ipAddr, cidrSuffix)
+			}
+		}
+	}
+
+	// Combine IP and CIDR for the API call
+	combinedIPCIDR := ""
+	if hasIPAddr && hasCIDR {
+		// If CIDR doesn't start with "/", add it
+		if !strings.HasPrefix(cidrSuffix, "/") {
+			cidrSuffix = "/" + cidrSuffix
+		}
+		combinedIPCIDR = ipAddr + cidrSuffix
+		ctx.Logger.Info("Combined IP address: %s", combinedIPCIDR)
+	}
 
 	gateway, err := store.GetOrDefault[string](ctx.Store(), "Gateway", "")
 	hasGateway := err == nil && gateway != ""
 
+	// Get DNS servers (either as string or directly as slice)
+	var dnsServers []string
 	dnsServersStr, err := store.GetOrDefault[string](ctx.Store(), "DNSServers", "")
-	hasDNS := err == nil && dnsServersStr != ""
-
-	// Apply network configuration if all required components are available
-	if hasHostname && hasIPCIDR && hasGateway && hasDNS {
-		ctx.Logger.Info("Applying network configuration...")
-
-		// Parse DNS servers from string representation
-		dnsServers := parseDNSServers(dnsServersStr)
-
-		// Default hostname if not provided or empty
-		if hostname == "" {
-			hostname = fmt.Sprintf("node%d", nodeID)
-			ctx.Logger.Info("Using default hostname: %s", hostname)
+	if err == nil && dnsServersStr != "" {
+		dnsServers = parseDNSServers(dnsServersStr)
+		ctx.Logger.Info("Parsed DNS servers from string: %v", dnsServers)
+	} else {
+		// Try to get DNS servers as slice directly
+		dnsServersSlice, err := store.GetOrDefault[[]string](ctx.Store(), "DNSServersList", nil)
+		if err == nil && len(dnsServersSlice) > 0 {
+			dnsServers = dnsServersSlice
+			ctx.Logger.Info("Retrieved DNS servers as slice: %v", dnsServers)
 		}
+	}
+	hasDNS := len(dnsServers) > 0
+
+	// Default hostname if not provided or empty
+	if !hasHostname {
+		hostname = fmt.Sprintf("rk1-node-%d", nodeID)
+		hasHostname = true
+		ctx.Logger.Info("Using default hostname: %s", hostname)
+	}
+
+	// Apply network configuration if we have required components
+	if hasHostname && hasIPAddr && hasCIDR && hasGateway && hasDNS {
+		ctx.Logger.Info("Applying network configuration...")
+		ctx.Logger.Info("Hostname: %s", hostname)
+		ctx.Logger.Info("IP Address: %s", ipAddr)
+		ctx.Logger.Info("CIDR Suffix: %s", cidrSuffix)
+		ctx.Logger.Info("Combined IPCIDR: %s", combinedIPCIDR)
+		ctx.Logger.Info("Gateway: %s", gateway)
+		ctx.Logger.Info("DNS Servers: %v", dnsServers)
 
 		// Apply the network configuration
 		if err := toolsProvider.GetOperationsTool().ApplyNetworkConfig(
 			ctx.GoContext,
 			mountPoint,
 			hostname,
-			ipCIDR,
+			combinedIPCIDR,
 			gateway,
 			dnsServers,
 		); err != nil {
@@ -128,18 +177,21 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 
 		ctx.Logger.Info("Network configuration applied successfully")
 	} else {
-		ctx.Logger.Info("Skipping network configuration as not all parameters are provided")
+		ctx.Logger.Warn("Skipping network configuration as not all parameters are provided:")
 		if !hasHostname {
-			ctx.Logger.Info("Missing hostname parameter")
+			ctx.Logger.Warn("- Missing hostname parameter")
 		}
-		if !hasIPCIDR {
-			ctx.Logger.Info("Missing IP CIDR parameter")
+		if !hasIPAddr {
+			ctx.Logger.Warn("- Missing IP address parameter")
+		}
+		if !hasCIDR {
+			ctx.Logger.Warn("- Missing CIDR suffix parameter")
 		}
 		if !hasGateway {
-			ctx.Logger.Info("Missing gateway parameter")
+			ctx.Logger.Warn("- Missing gateway parameter")
 		}
 		if !hasDNS {
-			ctx.Logger.Info("Missing DNS servers parameter")
+			ctx.Logger.Warn("- Missing DNS servers parameter")
 		}
 	}
 
@@ -180,15 +232,31 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 
 // parseDNSServers parses a string representation of DNS servers into a string slice
 func parseDNSServers(dnsStr string) []string {
-	// Remove brackets, spaces and split by commas
+	// Extensive cleaning to handle various formats
+	// Remove common formatting characters
 	dnsStr = strings.ReplaceAll(dnsStr, "[", "")
 	dnsStr = strings.ReplaceAll(dnsStr, "]", "")
-	dnsStr = strings.ReplaceAll(dnsStr, " ", "")
+	dnsStr = strings.ReplaceAll(dnsStr, "{", "")
+	dnsStr = strings.ReplaceAll(dnsStr, "}", "")
+	dnsStr = strings.ReplaceAll(dnsStr, "\"", "")
+	dnsStr = strings.ReplaceAll(dnsStr, "'", "")
+
+	// Split by commas
+	parts := strings.Split(dnsStr, ",")
+
+	// Clean each part and collect non-empty values
+	var result []string
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
 
 	// If empty, return empty slice
-	if dnsStr == "" {
+	if len(result) == 0 {
 		return []string{}
 	}
 
-	return strings.Split(dnsStr, ",")
+	return result
 }
