@@ -65,22 +65,35 @@ func (a *ImageUploadAction) executeImpl(ctx *gostage.ActionContext, toolsProvide
 		return fmt.Errorf("failed to get compressed image path: %w", err)
 	}
 
-	// Get the source image directory from the host machine
-	sourceImageDir, err := store.Get[string](ctx.Store(), "ubuntu.image.source.dir")
+	ctx.Logger.Info("Raw compressed image path from container: %s", compressedImagePath)
+
+	// We need to map from container path to host path
+	// The container's /tmp directory is mapped to the workflow temp directory
+	tempDir, err := store.Get[string](ctx.Store(), "workflow.tmp.dir")
 	if err != nil {
-		return fmt.Errorf("failed to get source image directory: %w", err)
+		return fmt.Errorf("failed to get workflow temp directory: %w", err)
 	}
 
-	// Extract image filename
-	imageXZName := filepath.Base(compressedImagePath)
+	// Extract just the filename from the container path
+	imageFileName := filepath.Base(compressedImagePath)
 
-	// Create the full host path for the compressed image
-	hostImagePath := filepath.Join(sourceImageDir, imageXZName)
-	ctx.Logger.Info("Using host image path: %s", hostImagePath)
+	// Build the host path using the workflow temp directory
+	hostImagePath := filepath.Join(tempDir, imageFileName)
+
+	ctx.Logger.Info("Mapped container path to host path: %s -> %s", compressedImagePath, hostImagePath)
+	ctx.Logger.Info("Using host machine path for upload: %s", hostImagePath)
+
+	// Check if the file exists on the host
+	if _, err := os.Stat(hostImagePath); os.IsNotExist(err) {
+		ctx.Logger.Error("ERROR: The image file doesn't exist at the host path: %s", hostImagePath)
+		ctx.Logger.Error("This suggests a mapping issue between the container and host paths")
+		return fmt.Errorf("image file not found on host at expected path: %s", hostImagePath)
+	}
 
 	// Define remote paths on BMC
 	remoteBaseDir := "/root/imgs" // Standard cache location on BMC
 	remoteNodeDir := fmt.Sprintf("%s/%d", remoteBaseDir, nodeID)
+	imageXZName := filepath.Base(hostImagePath)
 	remoteXZPath := fmt.Sprintf("%s/%s", remoteNodeDir, imageXZName)
 
 	// Get BMC tool
@@ -337,6 +350,20 @@ func (a *ImageUploadAction) executeImpl(ctx *gostage.ActionContext, toolsProvide
 
 	if strings.TrimSpace(stdout) == "exists" {
 		ctx.Logger.Info("Uncompressed image already exists on BMC: %s", remoteImgPath)
+
+		// DELETE the existing decompressed image to ensure we use the fresh one
+		ctx.Logger.Info("Removing existing decompressed image to ensure we use the fresh one")
+		_, stderr, err = bmcTool.ExecuteCommand(ctx.GoContext, fmt.Sprintf("rm -f %s", remoteImgPath))
+		if err != nil {
+			ctx.Logger.Warn("Failed to remove existing image: %v (stderr: %s)", err, stderr)
+		}
+
+		// Decompress image on BMC
+		ctx.Logger.Info("Decompressing fresh image on BMC: %s", remoteXZPath)
+		stdout, stderr, err = bmcTool.ExecuteCommand(ctx.GoContext, fmt.Sprintf("unxz -f -k %s", remoteXZPath))
+		if err != nil {
+			return fmt.Errorf("failed to decompress image on BMC: %w (stderr: %s)", err, stderr)
+		}
 	} else {
 		// Decompress image on BMC
 		ctx.Logger.Info("Decompressing image on BMC: %s", remoteXZPath)
@@ -346,6 +373,15 @@ func (a *ImageUploadAction) executeImpl(ctx *gostage.ActionContext, toolsProvide
 		}
 
 		ctx.Logger.Info("Image decompressed successfully")
+	}
+
+	// Just verify the decompressed file exists and check basic stats
+	ctx.Logger.Info("Verifying decompressed image exists on BMC")
+	stdout, stderr, err = bmcTool.ExecuteCommand(ctx.GoContext, fmt.Sprintf("ls -la %s", remoteImgPath))
+	if err != nil {
+		ctx.Logger.Warn("Failed to verify decompressed image: %v (stderr: %s)", err, stderr)
+	} else {
+		ctx.Logger.Info("Decompressed image stats: %s", stdout)
 	}
 
 	// Store remote image path for flashing

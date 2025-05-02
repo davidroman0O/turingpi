@@ -115,6 +115,32 @@ func (a *UARTMonitorAction) executeImpl(ctx *gostage.ActionContext, toolsProvide
 				ctx.Logger.Warn("Failed to store UART output: %v", err)
 			}
 
+			// Log any new output (avoid duplication)
+			lastOutput, _ := store.GetOrDefault[string](ctx.Store(), "LastProcessedUARTOutput", "")
+			if output != lastOutput {
+				// Look for new network-related information
+				newOutput := strings.TrimPrefix(output, lastOutput)
+
+				// Check for important networking information
+				if strings.Contains(newOutput, "eth0") ||
+					strings.Contains(newOutput, "192.168.") ||
+					strings.Contains(newOutput, "netplan") ||
+					strings.Contains(newOutput, "Network") {
+					ctx.Logger.Info("Network boot info: %s", extractNetworkInfo(newOutput))
+				}
+
+				// Update the last processed output
+				if err := ctx.Store().Put("LastProcessedUARTOutput", output); err != nil {
+					ctx.Logger.Warn("Failed to store processed UART output: %v", err)
+				}
+			}
+
+			// Check for our expected IP address
+			expectedIP := "192.168.1.101"
+			if strings.Contains(output, expectedIP) {
+				ctx.Logger.Info("FOUND EXPECTED IP IN BOOT OUTPUT: %s!", expectedIP)
+			}
+
 			// Check for boot progress indicators
 			if !systemdStarted && strings.Contains(output, "systemd[1]") {
 				systemdStarted = true
@@ -168,4 +194,23 @@ func (a *UARTMonitorAction) executeImpl(ctx *gostage.ActionContext, toolsProvide
 	}
 
 	return nil
+}
+
+// extractNetworkInfo extracts network-related information from UART output
+func extractNetworkInfo(output string) string {
+	lines := strings.Split(output, "\n")
+	var networkInfo []string
+
+	for _, line := range lines {
+		if strings.Contains(line, "eth0") ||
+			strings.Contains(line, "192.168.") ||
+			strings.Contains(line, "netplan") ||
+			strings.Contains(line, "Network") ||
+			strings.Contains(line, "addr") ||
+			strings.Contains(line, "gateway") {
+			networkInfo = append(networkInfo, strings.TrimSpace(line))
+		}
+	}
+
+	return strings.Join(networkInfo, "\n")
 }

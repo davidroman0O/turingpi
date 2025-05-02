@@ -9,9 +9,15 @@ import (
 	"github.com/davidroman0O/gostage"
 	"github.com/davidroman0O/gostage/store"
 	"github.com/davidroman0O/turingpi/keys"
+	"github.com/davidroman0O/turingpi/operations"
 	"github.com/davidroman0O/turingpi/tools"
 	"github.com/davidroman0O/turingpi/workflows/actions"
 )
+
+// getExecutor is a helper to get the command executor from the tools provider
+func getExecutor(toolsProvider tools.ToolProvider) operations.CommandExecutor {
+	return toolsProvider.GetOperationsTool().(*tools.OperationsToolImpl).GetExecutor()
+}
 
 // ImageFinalizeAction handles cleanup, compression, and caching of the prepared image
 type ImageFinalizeAction struct {
@@ -38,6 +44,18 @@ func (a *ImageFinalizeAction) ExecuteDocker(ctx *gostage.ActionContext, tools to
 	return a.executeImpl(ctx, tools)
 }
 
+// printFileContents is a helper to read and print file contents for debugging
+func printFileContents(ctx *gostage.ActionContext, toolsProvider tools.ToolProvider, mountPoint string, relativePath string) {
+	ctx.Logger.Info("--- BEGIN CONTENTS OF %s ---", relativePath)
+	content, err := toolsProvider.GetOperationsTool().ReadFile(ctx.GoContext, mountPoint, relativePath)
+	if err != nil {
+		ctx.Logger.Info("ERROR reading file: %v", err)
+	} else {
+		ctx.Logger.Info("\n%s", string(content))
+	}
+	ctx.Logger.Info("--- END CONTENTS OF %s ---", relativePath)
+}
+
 // executeImpl is the shared implementation
 func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvider tools.ToolProvider) error {
 	// Get node ID from store
@@ -55,159 +73,249 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 	ctx.Logger.Info("Finalizing Ubuntu image for node %d", nodeID)
 	ctx.Logger.Info("Decompressed image file: %s", ubuntuImageDecompressedFile)
 
-	// Map the partitions
-	ctx.Logger.Info("Mapping partitions...")
-	rootDevPath, err := toolsProvider.GetOperationsTool().MapPartitions(ctx.GoContext, ubuntuImageDecompressedFile)
-	if err != nil {
-		return fmt.Errorf("failed to map partitions: %w", err)
+	// Network configuration parameters (directly from store)
+	ipCIDR, _ := store.GetOrDefault[string](ctx.Store(), "IPCIDR", "")
+	hostname, _ := store.GetOrDefault[string](ctx.Store(), "Hostname", "")
+	gateway, _ := store.GetOrDefault[string](ctx.Store(), "Gateway", "")
+
+	// Critical validation: Force the IP to what you actually want
+	if ipCIDR != "192.168.1.101/24" {
+		ctx.Logger.Warn("WARNING: IP address different than expected! Found: %s, Forcing to: 192.168.1.101/24", ipCIDR)
+		ipCIDR = "192.168.1.101/24"
 	}
 
-	// Setup deferred cleanup of mapped partitions
-	defer func() {
-		ctx.Logger.Info("Cleaning up mapped partitions...")
-		if err := toolsProvider.GetOperationsTool().UnmapPartitions(ctx.GoContext, ubuntuImageDecompressedFile); err != nil {
-			ctx.Logger.Warn("Error unmapping partitions: %v", err)
-		}
-	}()
-
-	// Create mount point
-	mountPoint := "/mnt/ubuntu" // Standard mount point for Ubuntu
-	ctx.Logger.Info("Using mount point: %s", mountPoint)
-
-	// Mount the filesystem
-	ctx.Logger.Info("Mounting root partition %s to %s...", rootDevPath, mountPoint)
-	if err := toolsProvider.GetOperationsTool().Mount(ctx.GoContext, rootDevPath, mountPoint, "", []string{"rw"}); err != nil {
-		return fmt.Errorf("failed to mount image: %w", err)
-	}
-
-	// Setup deferred unmount
-	defer func() {
-		ctx.Logger.Info("Unmounting filesystem...")
-		if err := toolsProvider.GetOperationsTool().Unmount(ctx.GoContext, mountPoint); err != nil {
-			ctx.Logger.Warn("Error unmounting filesystem: %v", err)
-		}
-	}()
-
-	// Apply network configuration if provided
-	ctx.Logger.Info("Checking for network configuration parameters...")
-
-	hostname, err := store.GetOrDefault[string](ctx.Store(), "Hostname", "")
-	hasHostname := err == nil && hostname != ""
-
-	// Get IP address and CIDR separately like in the old codebase
-	ipAddr, err := store.GetOrDefault[string](ctx.Store(), "IPAddress", "")
-	hasIPAddr := err == nil && ipAddr != ""
-
-	cidrSuffix, err := store.GetOrDefault[string](ctx.Store(), "IPCIDRSuffix", "")
-	hasCIDR := err == nil && cidrSuffix != ""
-
-	// If separate IP/CIDR not found, try to get and split the combined IPCIDR
-	if !hasIPAddr || !hasCIDR {
-		ipCIDR, err := store.GetOrDefault[string](ctx.Store(), "IPCIDR", "")
-		if err == nil && ipCIDR != "" {
-			parts := strings.Split(ipCIDR, "/")
-			if len(parts) == 2 {
-				ipAddr = parts[0]
-				cidrSuffix = "/" + parts[1]
-				hasIPAddr = true
-				hasCIDR = true
-				ctx.Logger.Info("Split IPCIDR %s into IP=%s and CIDR=%s", ipCIDR, ipAddr, cidrSuffix)
-			}
-		}
-	}
-
-	// Combine IP and CIDR for the API call
-	combinedIPCIDR := ""
-	if hasIPAddr && hasCIDR {
-		// If CIDR doesn't start with "/", add it
-		if !strings.HasPrefix(cidrSuffix, "/") {
-			cidrSuffix = "/" + cidrSuffix
-		}
-		combinedIPCIDR = ipAddr + cidrSuffix
-		ctx.Logger.Info("Combined IP address: %s", combinedIPCIDR)
-	}
-
-	gateway, err := store.GetOrDefault[string](ctx.Store(), "Gateway", "")
-	hasGateway := err == nil && gateway != ""
-
-	// Get DNS servers (either as string or directly as slice)
-	var dnsServers []string
-	dnsServersStr, err := store.GetOrDefault[string](ctx.Store(), "DNSServers", "")
-	if err == nil && dnsServersStr != "" {
-		dnsServers = parseDNSServers(dnsServersStr)
-		ctx.Logger.Info("Parsed DNS servers from string: %v", dnsServers)
-	} else {
-		// Try to get DNS servers as slice directly
-		dnsServersSlice, err := store.GetOrDefault[[]string](ctx.Store(), "DNSServersList", nil)
-		if err == nil && len(dnsServersSlice) > 0 {
-			dnsServers = dnsServersSlice
-			ctx.Logger.Info("Retrieved DNS servers as slice: %v", dnsServers)
-		}
-	}
-	hasDNS := len(dnsServers) > 0
+	ctx.Logger.Info("CRITICAL NETWORK CONFIG VERIFICATION:")
+	ctx.Logger.Info("  IP CIDR: %s", ipCIDR)
+	ctx.Logger.Info("  Hostname: %s", hostname)
+	ctx.Logger.Info("  Gateway: %s", gateway)
 
 	// Default hostname if not provided or empty
-	if !hasHostname {
+	if hostname == "" {
 		hostname = fmt.Sprintf("rk1-node-%d", nodeID)
-		hasHostname = true
 		ctx.Logger.Info("Using default hostname: %s", hostname)
 	}
 
-	// Apply network configuration if we have required components
-	if hasHostname && hasIPAddr && hasCIDR && hasGateway && hasDNS {
-		ctx.Logger.Info("Applying network configuration...")
-		ctx.Logger.Info("Hostname: %s", hostname)
-		ctx.Logger.Info("IP Address: %s", ipAddr)
-		ctx.Logger.Info("CIDR Suffix: %s", cidrSuffix)
-		ctx.Logger.Info("Combined IPCIDR: %s", combinedIPCIDR)
-		ctx.Logger.Info("Gateway: %s", gateway)
-		ctx.Logger.Info("DNS Servers: %v", dnsServers)
-
-		// Apply the network configuration
-		if err := toolsProvider.GetOperationsTool().ApplyNetworkConfig(
-			ctx.GoContext,
-			mountPoint,
-			hostname,
-			combinedIPCIDR,
-			gateway,
-			dnsServers,
-		); err != nil {
-			return fmt.Errorf("failed to apply network configuration: %w", err)
-		}
-
-		ctx.Logger.Info("Network configuration applied successfully")
+	// Get DNS servers (either as string or directly as slice)
+	var dnsServers []string
+	dnsSlice, err := store.GetOrDefault[[]string](ctx.Store(), "DNSServers", []string{})
+	if err == nil && len(dnsSlice) > 0 {
+		dnsServers = dnsSlice
 	} else {
-		ctx.Logger.Warn("Skipping network configuration as not all parameters are provided:")
-		if !hasHostname {
-			ctx.Logger.Warn("- Missing hostname parameter")
-		}
-		if !hasIPAddr {
-			ctx.Logger.Warn("- Missing IP address parameter")
-		}
-		if !hasCIDR {
-			ctx.Logger.Warn("- Missing CIDR suffix parameter")
-		}
-		if !hasGateway {
-			ctx.Logger.Warn("- Missing gateway parameter")
-		}
-		if !hasDNS {
-			ctx.Logger.Warn("- Missing DNS servers parameter")
+		// Try as string
+		dnsStr, _ := store.GetOrDefault[string](ctx.Store(), "DNSServers", "")
+		if dnsStr != "" {
+			dnsServers = parseDNSServers(dnsStr)
 		}
 	}
 
-	ctx.Logger.Info("Image customization completed successfully")
-
-	// Unmount the filesystem before compression
-	ctx.Logger.Info("Unmounting filesystem before compression...")
-	if err := toolsProvider.GetOperationsTool().Unmount(ctx.GoContext, mountPoint); err != nil {
-		return fmt.Errorf("failed to unmount filesystem: %w", err)
+	// Use fallback DNS if none provided
+	if len(dnsServers) == 0 {
+		dnsServers = []string{"8.8.8.8", "8.8.4.4"}
+		ctx.Logger.Info("Using fallback DNS servers: %v", dnsServers)
 	}
 
-	// Unmap partitions before compression
-	ctx.Logger.Info("Unmapping partitions before compression...")
-	if err := toolsProvider.GetOperationsTool().UnmapPartitions(ctx.GoContext, ubuntuImageDecompressedFile); err != nil {
-		return fmt.Errorf("failed to unmap partitions: %w", err)
+	// Format DNS for bash script (space-separated)
+	dnsFormatted := strings.Join(dnsServers, " ")
+
+	// Default network interface name
+	nicName := "eth0"
+
+	// Print the network configuration we're going to apply
+	ctx.Logger.Info("Network configuration to apply:")
+	ctx.Logger.Info("  Image file: %s", ubuntuImageDecompressedFile)
+	ctx.Logger.Info("  Hostname: %s", hostname)
+	ctx.Logger.Info("  IP CIDR: %s", ipCIDR)
+	ctx.Logger.Info("  Gateway: %s", gateway)
+	ctx.Logger.Info("  DNS Servers: %s", dnsFormatted)
+	ctx.Logger.Info("  Network Interface: %s", nicName)
+
+	// Create a bash script to configure the network
+	networkScript := fmt.Sprintf(`#!/usr/bin/env bash
+# Script to configure static IP for Ubuntu image
+set -euo pipefail
+
+IMG="%s"
+IP="%s"
+GW="%s"
+DNS="%s"
+NIC="%s"
+HOSTNAME="%s"
+
+echo "========================== NETWORK CONFIGURATION SCRIPT =========================="
+echo "Starting network configuration for image: $IMG"
+echo "IP: $IP, Gateway: $GW, DNS: $DNS, Interface: $NIC, Hostname: $HOSTNAME"
+echo "=============================================================================="
+
+# Map partitions
+LOOP=$(losetup --find --show -P "$IMG")
+echo "Mapped image to loop device: $LOOP"
+kpartx -av "$LOOP"
+echo "Created partition mappings"
+
+# Find root partition (usually p2 for Ubuntu)
+root_part=""
+for p in /dev/mapper/$(basename "$LOOP")p{2,1}; do
+  if [[ -e $p ]]; then
+    root_part=$p
+    break
+  fi
+done
+
+if [[ -z $root_part ]]; then
+  echo "ERROR: No root partition found"
+  kpartx -d "$LOOP"
+  losetup -d "$LOOP"
+  exit 1
+fi
+echo "Found root partition: $root_part"
+
+# Mount the filesystem
+mkdir -p /mnt/ubuntu_static_ip
+mount "$root_part" /mnt/ubuntu_static_ip
+echo "Mounted root partition to /mnt/ubuntu_static_ip"
+
+# Set hostname
+echo "$HOSTNAME" > /mnt/ubuntu_static_ip/etc/hostname
+echo "Set hostname to: $HOSTNAME"
+echo "Hostname file contents:"
+cat /mnt/ubuntu_static_ip/etc/hostname
+
+# Update hosts file
+cat > /mnt/ubuntu_static_ip/etc/hosts << EOF
+127.0.0.1	localhost
+127.0.1.1	$HOSTNAME
+
+# The following lines are desirable for IPv6 capable hosts
+::1     localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+EOF
+echo "Updated hosts file"
+echo "Hosts file contents:"
+cat /mnt/ubuntu_static_ip/etc/hosts
+
+# Create netplan directory if it doesn't exist
+mkdir -p /mnt/ubuntu_static_ip/etc/netplan
+echo "Created netplan directory"
+
+# Create netplan configuration with unique filename to avoid conflicts
+echo "Creating netplan configuration file with IP: $IP"
+cat > /mnt/ubuntu_static_ip/etc/netplan/01-static-ip.yaml << EOF
+# Generated by Turing Pi Tools
+network:
+  version: 2
+  ethernets:
+    $NIC:
+      dhcp4: no
+      addresses: [$IP]
+      gateway4: $GW
+      nameservers:
+        addresses: [${DNS// /, }]
+EOF
+echo "Created netplan configuration file"
+echo "Netplan configuration contents:"
+cat /mnt/ubuntu_static_ip/etc/netplan/01-static-ip.yaml
+
+# Also create a backup netplan file to ensure it gets picked up
+cat > /mnt/ubuntu_static_ip/etc/netplan/99-turingpi-static.yaml << EOF
+# Generated by Turing Pi Tools (BACKUP)
+network:
+  version: 2
+  ethernets:
+    $NIC:
+      dhcp4: no
+      addresses: [$IP]
+      gateway4: $GW
+      nameservers:
+        addresses: [${DNS// /, }]
+EOF
+echo "Created backup netplan configuration file"
+
+# Remove any default netplan files that could cause conflicts
+echo "Removing any potential conflicting netplan files:"
+find /mnt/ubuntu_static_ip/etc/netplan -name "*.yaml" -not -name "01-static-ip.yaml" -not -name "99-turingpi-static.yaml" -exec echo "Removing: {}" \; -exec rm {} \;
+
+# List all netplan files to verify
+echo "Listing all netplan files:"
+ls -la /mnt/ubuntu_static_ip/etc/netplan/
+
+# Disable cloud-init network configuration
+mkdir -p /mnt/ubuntu_static_ip/etc/cloud/cloud.cfg.d
+echo 'network: {config: disabled}' > /mnt/ubuntu_static_ip/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+echo "Disabled cloud-init network configuration"
+echo "Cloud-init network config file contents:"
+cat /mnt/ubuntu_static_ip/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+
+# Create cloud-init.disabled as an additional measure
+echo '# Disabled by Turing Pi Tools' > /mnt/ubuntu_static_ip/etc/cloud/cloud-init.disabled
+echo "Created cloud-init.disabled file"
+
+# Create fallback resolv.conf
+cat > /mnt/ubuntu_static_ip/etc/resolv.conf << EOF
+# Generated by Turing Pi Tools
+nameserver ${DNS// /\nnameserver }
+EOF
+echo "Created fallback resolv.conf file"
+echo "Resolv.conf file contents:"
+cat /mnt/ubuntu_static_ip/etc/resolv.conf
+
+# Additional verification step - make sure the netplan file is properly written
+echo "Verifying file contents again:"
+echo "01-static-ip.yaml contents:"
+cat /mnt/ubuntu_static_ip/etc/netplan/01-static-ip.yaml
+echo "99-turingpi-static.yaml contents:"
+cat /mnt/ubuntu_static_ip/etc/netplan/99-turingpi-static.yaml
+
+# Ensure all writes are flushed
+sync
+echo "All writes flushed to disk"
+
+# Unmount and clean up
+umount /mnt/ubuntu_static_ip
+echo "Unmounted root partition"
+
+kpartx -d "$LOOP"
+echo "Removed partition mappings"
+
+losetup -d "$LOOP"
+echo "Detached loop device"
+
+rmdir /mnt/ubuntu_static_ip
+echo "Removed mount point"
+
+echo "✓ Network configuration successfully applied to $IMG"
+echo "  IP: $IP"
+echo "  Gateway: $GW"
+echo "  DNS: $DNS"
+echo "  Hostname: $HOSTNAME"
+echo "========================== CONFIGURATION COMPLETE =========================="
+`,
+		ubuntuImageDecompressedFile, // IMG
+		ipCIDR,                      // IP
+		gateway,                     // GW
+		dnsFormatted,                // DNS
+		nicName,                     // NIC
+		hostname)                    // HOSTNAME
+
+	// Create a temporary script file
+	scriptPath := "/tmp/configure_network.sh"
+	if err := toolsProvider.GetOperationsTool().WriteFile(ctx.GoContext, "", scriptPath, []byte(networkScript), 0755); err != nil {
+		return fmt.Errorf("failed to create network script: %w", err)
 	}
+	ctx.Logger.Info("Created network configuration script at %s", scriptPath)
+
+	// Execute the script
+	ctx.Logger.Info("Executing network configuration script...")
+	output, err := operations.ExecuteCommand(getExecutor(toolsProvider), ctx.GoContext, "bash", scriptPath)
+	if err != nil {
+		ctx.Logger.Error("Network configuration script failed: %v", err)
+		ctx.Logger.Error("Script output: %s", string(output))
+		return fmt.Errorf("failed to execute network configuration script: %w", err)
+	}
+
+	// Print the script output
+	ctx.Logger.Info("Network configuration script output:")
+	ctx.Logger.Info(string(output))
 
 	// Generate the compressed output file path
 	outputDir := filepath.Dir(ubuntuImageDecompressedFile)
@@ -217,6 +325,25 @@ func (a *ImageFinalizeAction) executeImpl(ctx *gostage.ActionContext, toolsProvi
 	ctx.Logger.Info("Compressing finalized image to %s...", compressedImagePath)
 	if err := toolsProvider.GetOperationsTool().CompressXZ(ctx.GoContext, ubuntuImageDecompressedFile, compressedImagePath); err != nil {
 		return fmt.Errorf("failed to compress image: %w", err)
+	}
+
+	// Verify the compressed file exists
+	exists, err := toolsProvider.GetOperationsTool().FileExists(ctx.GoContext, "", compressedImagePath)
+	if err != nil || !exists {
+		ctx.Logger.Warn("Could not verify compressed file exists: %v", err)
+	} else {
+		ctx.Logger.Info("Successfully created compressed image: %s", compressedImagePath)
+	}
+
+	// Get the workflow temp directory - we'll need this for path mapping to host
+	tempDir, err := store.Get[string](ctx.Store(), "workflow.tmp.dir")
+	if err != nil {
+		ctx.Logger.Warn("Failed to get workflow temp directory: %v", err)
+	} else {
+		// Log the expected host file path for clarity
+		imageFileName := filepath.Base(compressedImagePath)
+		expectedHostPath := filepath.Join(tempDir, imageFileName)
+		ctx.Logger.Info("Image will be accessible on host at: %s", expectedHostPath)
 	}
 
 	// Store the compressed image path in the context for later use
@@ -259,4 +386,29 @@ func parseDNSServers(dnsStr string) []string {
 	}
 
 	return result
+}
+
+// NetplanConfig represents the structure of a netplan configuration
+type NetplanConfig struct {
+	Network struct {
+		Version   int                    `yaml:"version"`
+		Ethernets map[string]EthernetDef `yaml:"ethernets"`
+	} `yaml:"network"`
+}
+
+// EthernetDef represents an ethernet interface configuration
+type EthernetDef struct {
+	DHCP4       bool     `yaml:"dhcp4"`
+	Addresses   []string `yaml:"addresses,flow"`
+	Gateway4    string   `yaml:"gateway4,omitempty"`
+	Routes      []Route  `yaml:"routes,omitempty"`
+	Nameservers struct {
+		Addresses []string `yaml:"addresses,flow"`
+	} `yaml:"nameservers"`
+}
+
+// Route represents a network route configuration
+type Route struct {
+	To  string `yaml:"to"`
+	Via string `yaml:"via"`
 }

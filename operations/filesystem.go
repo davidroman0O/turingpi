@@ -166,6 +166,7 @@ func (f *FilesystemOperations) UnmapPartitions(ctx context.Context, imgPathAbs s
 
 	// First, get a list of mapped devices for this image to verify cleanup
 	// We use losetup to find which loop device is associated with our image
+	loopDevices := []string{}
 	losetupOutput, err := ExecuteCommand(f.executor, ctx, "losetup", "-j", imgPathAbs)
 	if err == nil && len(losetupOutput) > 0 {
 		// Parse out the loop device name from output like "/dev/loop0: []: (/path/to/image)"
@@ -179,6 +180,7 @@ func (f *FilesystemOperations) UnmapPartitions(ctx context.Context, imgPathAbs s
 			if len(loopParts) > 0 {
 				loopDev := strings.TrimSpace(loopParts[0])
 				fmt.Printf("Found mapped loop device: %s\n", loopDev)
+				loopDevices = append(loopDevices, loopDev)
 			}
 		}
 	}
@@ -213,7 +215,23 @@ func (f *FilesystemOperations) UnmapPartitions(ctx context.Context, imgPathAbs s
 				forceErr, string(forceOutput))
 		}
 
-		// If still mapped, try to find and detach the loop device directly
+		// If we found specific loop devices earlier, try to detach them directly
+		for _, loopDev := range loopDevices {
+			fmt.Printf("Attempting to detach loop device: %s\n", loopDev)
+			detachOutput, detachErr := ExecuteCommand(f.executor, ctx, "losetup", "-d", loopDev)
+			if detachErr != nil {
+				fmt.Printf("Warning: Failed to detach loop device %s: %v\nOutput: %s\n",
+					loopDev, detachErr, string(detachOutput))
+			} else {
+				fmt.Printf("Successfully detached loop device: %s\n", loopDev)
+			}
+		}
+
+		// As a last resort, try to force ALL loop devices to rescan
+		fmt.Printf("Requesting all loop devices to rescan...\n")
+		_, _ = ExecuteCommand(f.executor, ctx, "losetup", "-D")
+
+		// Final verification
 		finalVerifyOutput, _ := ExecuteCommand(f.executor, ctx, "losetup", "-j", imgPathAbs)
 		if len(finalVerifyOutput) > 0 && strings.TrimSpace(string(finalVerifyOutput)) != "" {
 			fmt.Printf("Warning: Image still has loop mappings after forceful cleanup: %s\n",

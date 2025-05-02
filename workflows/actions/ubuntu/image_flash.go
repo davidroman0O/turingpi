@@ -94,12 +94,64 @@ func (a *ImageFlashAction) executeImpl(ctx *gostage.ActionContext, toolsProvider
 	ctx.Logger.Info("Flashing image to node %d", nodeID)
 	ctx.Logger.Info("Image path: %s", remoteImagePath)
 
-	// Use the proper BMC interface method instead of directly executing the command
-	err = bmcTool.FlashNode(context.Background(), nodeID, remoteImagePath)
+	// Get the configured IP address for debugging
+	ipCIDR, err := store.GetOrDefault[string](ctx.Store(), "IPCIDR", "")
+	if err == nil && ipCIDR != "" {
+		ctx.Logger.Info("Configured IP CIDR for this node: %s", ipCIDR)
+	} else {
+		ctx.Logger.Warn("No IPCIDR found in store!")
+	}
+
+	// Explicitly log all relevant store keys
+	ctx.Logger.Info("Critical store values for network configuration:")
+	if val, err := store.GetOrDefault[string](ctx.Store(), "IPCIDR", ""); err == nil {
+		ctx.Logger.Info("  IPCIDR: %s", val)
+	}
+	if val, err := store.GetOrDefault[string](ctx.Store(), "Hostname", ""); err == nil {
+		ctx.Logger.Info("  Hostname: %s", val)
+	}
+	if val, err := store.GetOrDefault[string](ctx.Store(), "Gateway", ""); err == nil {
+		ctx.Logger.Info("  Gateway: %s", val)
+	}
+
+	// Create a context with timeout to prevent hanging
+	flashCtx, cancel := context.WithTimeout(ctx.GoContext, 3*time.Minute)
+	defer cancel()
+
+	// Execute the flash command directly with timeout
+	ctx.Logger.Info("Executing direct flash command with 3-minute timeout")
+	flashCmd := fmt.Sprintf("flash_node %d %s", nodeID, remoteImagePath)
+
+	// Start a separate goroutine to show progress during the flash operation
+	progressDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ctx.Logger.Info("Flash operation still in progress... (waiting)")
+			case <-progressDone:
+				return
+			}
+		}
+	}()
+
+	// Execute the command
+	stdout, stderr, err := bmcTool.ExecuteCommand(flashCtx, flashCmd)
+	close(progressDone) // Signal the progress goroutine to stop
+
 	if err != nil {
+		if flashCtx.Err() == context.DeadlineExceeded {
+			ctx.Logger.Error("Flash operation timed out after 3 minutes")
+			return fmt.Errorf("flash operation timed out after 3 minutes")
+		}
+		ctx.Logger.Error("Flash operation failed: %v", err)
+		ctx.Logger.Error("Stderr: %s", stderr)
 		return fmt.Errorf("failed to flash node: %w", err)
 	}
 
+	ctx.Logger.Info("Flash command output: %s", stdout)
 	ctx.Logger.Info("Image flashed successfully to node %d", nodeID)
 
 	// Set node mode to normal using ExecuteCommand

@@ -29,7 +29,7 @@ func (n *NetworkOperations) ApplyNetworkConfig(ctx context.Context, mountDir, ho
 	fmt.Printf("Hostname: %s\n", hostname)
 	fmt.Printf("IP CIDR: %s\n", ipCIDR)
 	fmt.Printf("Gateway: %s\n", gateway)
-	fmt.Printf("DNS Servers: %v\n", dnsServers)
+	fmt.Printf("DNS Servers (input): %v\n", dnsServers)
 
 	// Sanitize the DNS servers - ensure there are no formatting issues
 	var cleanDNSServers []string
@@ -101,14 +101,50 @@ func (n *NetworkOperations) configureNetplan(ctx context.Context, mountDir, ipCI
 		return fmt.Errorf("failed to create netplan directory: %w", err)
 	}
 
-	// Convert DNS server list to properly quoted format for YAML
-	var dnsQuoted []string
+	// Clean and sanitize DNS servers
+	var cleanedDNSList []string
 	for _, dns := range dnsServers {
-		// Add each DNS server as a properly formatted string
-		dnsQuoted = append(dnsQuoted, fmt.Sprintf("%s", dns))
+		// Clean the DNS server address
+		dns = strings.TrimSpace(dns)
+
+		// Remove quotes, brackets and other characters that might be present
+		dns = strings.Trim(dns, "[]\"'")
+
+		// Skip empty entries
+		if dns == "" {
+			continue
+		}
+
+		// Handle case where multiple DNS entries are in a single string
+		if strings.Contains(dns, ",") {
+			parts := strings.Split(dns, ",")
+			for _, part := range parts {
+				cleanPart := strings.TrimSpace(part)
+				if cleanPart != "" {
+					cleanedDNSList = append(cleanedDNSList, cleanPart)
+				}
+			}
+		} else {
+			cleanedDNSList = append(cleanedDNSList, dns)
+		}
 	}
-	dnsAddrs := strings.Join(dnsQuoted, ", ")
-	fmt.Printf("DNS Addresses for netplan: [%s]\n", dnsAddrs)
+
+	// Format DNS servers for YAML - each as individual quoted item in comma-separated list
+	dnsAddrs := ""
+	if len(cleanedDNSList) > 0 {
+		// Convert the list to a quoted, comma-separated string
+		quotedList := make([]string, len(cleanedDNSList))
+		for i, dns := range cleanedDNSList {
+			quotedList[i] = dns
+		}
+		dnsAddrs = strings.Join(quotedList, ", ")
+		fmt.Printf("DNS Addresses for netplan: [%s]\n", dnsAddrs)
+	} else {
+		fmt.Printf("Warning: No valid DNS servers provided for network configuration\n")
+		// Provide fallback DNS servers (Google DNS)
+		dnsAddrs = "8.8.8.8, 8.8.4.4"
+		fmt.Printf("Using fallback DNS servers: [%s]\n", dnsAddrs)
+	}
 
 	// Check if we should use gateway4 (older) or routes (newer)
 	useRoutes := false
@@ -169,6 +205,7 @@ network:
 	}
 
 	fmt.Printf("Successfully wrote netplan configuration\n")
+	fmt.Printf("Netplan content:\n%s\n", netplanYaml)
 	return nil
 }
 

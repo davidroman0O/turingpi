@@ -261,3 +261,8 @@ func (t *OperationsToolImpl) Close() error {
 	}
 	return nil
 }
+
+// GetExecutor returns the underlying CommandExecutor
+func (t *OperationsToolImpl) GetExecutor() operations.CommandExecutor {
+	return t.executor
+}
